@@ -42,7 +42,7 @@ impl Frame {
 }
 
 /// A planar face of the target body, as plane plus bounding box.
-struct TargetPlane {
+pub struct TargetPlane {
     normal: Vector3,
     point: Point3,
     min: Point3,
@@ -50,26 +50,24 @@ struct TargetPlane {
 }
 
 /// Extrudes `region` from `start` to `start + length` along the frame
-/// normal (`length > 0`), adjusted for flush faces of `target`.
+/// normal (`length > 0`), adjusted for faces flush with `planes` (the
+/// target body's planar faces, from [`target_planes`]).
 pub fn tool(
     frame: &Frame,
     region: &Region,
     start: f64,
     length: f64,
-    target: Option<(&Solid, BodyOperation)>,
+    planes: &[TargetPlane],
+    op: BodyOperation,
 ) -> Option<Solid> {
-    let planes = match target {
-        Some((solid, BodyOperation::Join | BodyOperation::Cut)) => target_planes(solid),
-        _ => Vec::new(),
-    };
-    let op = target.map(|(_, op)| op);
+    let op = Some(op);
     let (bottom, top) = (start, start + length);
 
     // Offsets along each face's outward normal; positive grows the tool.
     let all_points = || region.outer.iter().chain(region.holes.iter().flatten());
     let cap = |height: f64, normal: Vector3| {
         let corners: Vec<_> = all_points().map(|&p| frame.at(p, height)).collect();
-        flush_offset(&planes, op, normal, &corners)
+        flush_offset(planes, op, normal, &corners)
     };
     let d_bottom = cap(bottom, -frame.normal);
     let d_top = cap(top, frame.normal);
@@ -86,7 +84,7 @@ pub fn tool(
                     frame.at(a, top),
                     frame.at(b, top),
                 ];
-                flush_offset(&planes, op, side_normal(frame, a, b), &corners)
+                flush_offset(planes, op, side_normal(frame, a, b), &corners)
             })
             .collect();
         let moved = offset_loop(points, &offsets);
@@ -182,7 +180,7 @@ fn offset_loop(points: &[Point2], offsets: &[f64]) -> Vec<Point2> {
         .collect()
 }
 
-fn target_planes(solid: &Solid) -> Vec<TargetPlane> {
+pub fn target_planes(solid: &Solid) -> Vec<TargetPlane> {
     solid
         .boundaries()
         .iter()

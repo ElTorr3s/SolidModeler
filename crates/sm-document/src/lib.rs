@@ -175,7 +175,14 @@ pub enum DocumentError {
     NonFinite(String),
     #[error("parameter name {0:?} is empty, invalid, or used twice")]
     BadParameterName(String),
+    #[error("feature id {0:?} is out of range")]
+    IdOutOfRange(FeatureId),
+    #[error("document has more than {MAX_FEATURES} features")]
+    TooManyFeatures,
 }
+
+/// Far beyond any real part; stops corrupt or hostile files early.
+pub const MAX_FEATURES: usize = 100_000;
 
 impl PartDocument {
     pub fn new(name: impl Into<String>, units: LengthUnit) -> Self {
@@ -233,7 +240,13 @@ impl PartDocument {
     /// Checks ids, references, numbers and parameter names.
     pub fn validate(&self) -> Result<(), DocumentError> {
         let mut index = HashMap::with_capacity(self.features.len());
+        if self.features.len() > MAX_FEATURES {
+            return Err(DocumentError::TooManyFeatures);
+        }
         for (i, feature) in self.features.iter().enumerate() {
+            if feature.id.0 == u32::MAX {
+                return Err(DocumentError::IdOutOfRange(feature.id));
+            }
             if index.insert(feature.id, i).is_some() {
                 return Err(DocumentError::DuplicateId(feature.id));
             }
@@ -387,6 +400,16 @@ mod tests {
         assert_eq!(
             doc.validate(),
             Err(DocumentError::MissingFeature(FeatureId(99)))
+        );
+    }
+
+    #[test]
+    fn rejects_max_id() {
+        let mut doc = block();
+        doc.features[1].id = FeatureId(u32::MAX);
+        assert_eq!(
+            doc.validate(),
+            Err(DocumentError::IdOutOfRange(FeatureId(u32::MAX)))
         );
     }
 

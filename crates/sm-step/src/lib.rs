@@ -17,11 +17,13 @@ pub fn export(model: &Model, file_name: &str) -> String {
         .bodies
         .iter()
         .map(|b| {
+            // truck-stepio miswrites intersection curves; see sm_kernel::curves.
+            let solid = sm_kernel::curves::without_intersection_curves(&b.solid);
             if scale == 1.0 {
-                b.solid.compress()
+                solid.compress()
             } else {
                 builder::scaled(
-                    &b.solid,
+                    &solid,
                     Point3::new(0.0, 0.0, 0.0),
                     Vector3::new(scale, scale, scale),
                 )
@@ -118,9 +120,68 @@ mod tests {
         (shell.faces.len(), max.map(|x| (x * 1e6).round() / 1e6))
     }
 
+    /// Every `#n = ...` defined once and every `#n` referenced is defined.
+    fn assert_well_formed(step: &str) {
+        let data = &step[step.find("DATA;").unwrap()..];
+        let mut defined = std::collections::HashSet::new();
+        let mut referenced = Vec::new();
+        for line in data.lines() {
+            let mut rest = line;
+            if let Some(def) = line.strip_prefix('#') {
+                let (id, tail) = def.split_once(" =").expect("entity line");
+                assert!(defined.insert(id.to_string()), "#{id} defined twice");
+                rest = tail;
+            }
+            for part in rest.split('#').skip(1) {
+                let id: String = part.chars().take_while(char::is_ascii_digit).collect();
+                referenced.push(id);
+            }
+        }
+        for id in referenced {
+            assert!(defined.contains(&id), "#{id} referenced but not defined");
+        }
+    }
+
+    #[test]
+    fn boolean_results_export_well_formed() {
+        let mut model = block(LengthUnit::Mm);
+        let mut doc = PartDocument::new("Pocket", LengthUnit::Mm);
+        let rect = |[x0, y0, x1, y1]: [f64; 4]| Profile {
+            points: vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+        };
+        for (r, z, d, op) in [
+            ([0.0, 0.0, 4.0, 2.0], 0.0, 1.0, BodyOperation::Join),
+            ([1.0, 0.5, 3.0, 1.5], 1.0, -0.5, BodyOperation::Cut),
+            ([3.5, 0.0, 4.0, 2.0], 0.5, 0.5, BodyOperation::Cut),
+        ] {
+            let sketch = doc.add_feature(
+                "S",
+                FeatureKind::Sketch(Sketch {
+                    plane: OriginPlane::XY,
+                    offset: z,
+                    profiles: vec![rect(r)],
+                }),
+            );
+            doc.add_feature(
+                "E",
+                FeatureKind::Extrude(Extrude {
+                    sketch,
+                    extent: ExtrudeExtent::Distance { distance: d },
+                    operation: op,
+                }),
+            );
+        }
+        model.bodies = sm_kernel::rebuild(&doc).unwrap().bodies;
+        let step = export(&model, "pocket.step");
+        assert_well_formed(&step);
+        assert!(!step.contains("INTERSECTION_CURVE"));
+        assert_eq!(read_back(&step), (13, [4.0, 2.0, 1.0]));
+    }
+
     #[test]
     fn exports_millimetres_as_is() {
         let step = export(&block(LengthUnit::Mm), "block.step");
+        assert_well_formed(&step);
         assert_eq!(read_back(&step), (6, [4.0, 2.0, 1.0]));
     }
 

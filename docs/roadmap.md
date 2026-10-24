@@ -1,6 +1,11 @@
 # Roadmap
 
-Long-term goal: professional use with Autodesk Inventor feature parity, on
+**Vision:** Autodesk Inventor's modeling and workflow, with Onshape's file
+and version management (history, branches, merges), running locally on an
+Omarchy machine instead of in the cloud. Everything works offline. Files and
+version history live on the user's disk, with no server or account needed.
+
+Long-term goal: professional use with Inventor feature parity, on
 Linux/Wayland with first-class Omarchy support.
 
 1. **Foundations** *(done)*. Rust workspace, feature history model, native
@@ -24,8 +29,8 @@ Linux/Wayland with first-class Omarchy support.
    portal `color-scheme` setting, and colors from the active Omarchy theme,
    updated live when the user switches themes. Falls back to plain light and
    dark themes on other desktops.
-5. **Versions, branches and merges.** Onshape-style history on the feature
-   tree itself: every edit is a change to the feature list, branches can be
+5. **Versions, branches and merges (local-first).** Onshape-style history on
+   the feature tree itself, stored locally next to the part (no cloud): every edit is a change to the feature list, branches can be
    created and merged at the feature level, and geometry is rebuilt from
    whatever version is checked out. Edits to different features merge
    automatically; edits to the same feature need a manual pick. Depends on

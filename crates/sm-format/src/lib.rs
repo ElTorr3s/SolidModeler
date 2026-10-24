@@ -34,11 +34,11 @@ const CACHE_STEP: &str = "cache/model.step";
 /// Largest uncompressed size accepted for each entry. Zip entries can
 /// decompress about 1000:1, so these stop small files from exhausting memory.
 pub const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
-pub const MAX_DOCUMENT_BYTES: u64 = 64 * 1024 * 1024;
-pub const MAX_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
-/// Every version is a full snapshot of the document, so this is larger than
-/// the document limit.
-pub const MAX_HISTORY_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_DOCUMENT_BYTES: u64 = 8 * 1024 * 1024;
+pub const MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+/// Versions share unchanged features and parameters, so a long history
+/// stays a small multiple of one document.
+pub const MAX_HISTORY_BYTES: u64 = 64 * 1024 * 1024;
 
 const GENERATOR: &str = concat!("SolidModeller ", env!("CARGO_PKG_VERSION"));
 
@@ -111,25 +111,25 @@ pub fn save_with_history(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let name = path
-        .file_name()
-        .map_or_else(Default::default, |n| n.to_string_lossy());
-    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
-    let result = (|| {
-        let file = File::create(&tmp)?;
-        let mut out = BufWriter::new(file);
-        write_with_history(&mut out, doc, history, cached_step)?;
-        out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
-        std::fs::rename(&tmp, path)?;
-        // Make the rename itself durable.
-        #[cfg(unix)]
-        File::open(dir)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    // A randomly named temp file, created exclusively, so nothing can
+    // pre-plant a symlink at its path. It is deleted if anything fails.
+    let tmp = tempfile::Builder::new()
+        .prefix(".smp-save-")
+        .tempfile_in(dir)?;
+    let mut out = BufWriter::new(tmp.as_file());
+    write_with_history(&mut out, doc, history, cached_step)?;
+    out.flush()?;
+    drop(out);
+    // Keep the original file's permissions.
+    if let Ok(meta) = std::fs::metadata(path) {
+        tmp.as_file().set_permissions(meta.permissions())?;
     }
-    result
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    // Make the rename itself durable.
+    #[cfg(unix)]
+    File::open(dir)?.sync_all()?;
+    Ok(())
 }
 
 pub fn open(path: &Path) -> Result<SmpFile, FormatError> {
@@ -214,16 +214,18 @@ pub fn read<R: Read + Seek>(input: R) -> Result<SmpFile, FormatError> {
     }
 
     let document_bytes = read_entry(&mut zip, DOCUMENT, MAX_DOCUMENT_BYTES)?;
-    let json: serde_json::Value =
-        serde_json::from_slice(&document_bytes).map_err(|source| FormatError::Json {
-            file: DOCUMENT,
-            source,
-        })?;
-    let mut document: PartDocument = serde_json::from_value(migrate(manifest.version, json)?)
-        .map_err(|source| FormatError::Json {
-            file: DOCUMENT,
-            source,
-        })?;
+    // Current-version documents deserialize straight into the typed model;
+    // only older versions go through the slower, larger JSON-value upgrade.
+    let json_error = |source| FormatError::Json {
+        file: DOCUMENT,
+        source,
+    };
+    let mut document: PartDocument = if manifest.version == FORMAT_VERSION {
+        serde_json::from_slice(&document_bytes).map_err(json_error)?
+    } else {
+        let json = serde_json::from_slice(&document_bytes).map_err(json_error)?;
+        serde_json::from_value(migrate(manifest.version, json)?).map_err(json_error)?
+    };
     document.repair_ids();
     document.validate()?;
 
@@ -266,7 +268,7 @@ pub fn read<R: Read + Seek>(input: R) -> Result<SmpFile, FormatError> {
 /// each future version adds a step here.
 pub fn migrate(version: u32, json: serde_json::Value) -> Result<serde_json::Value, FormatError> {
     match version {
-        1 => Ok(json),
+        FORMAT_VERSION => Ok(json),
         v => Err(FormatError::BadVersion(v)),
     }
 }
@@ -530,6 +532,15 @@ mod tests {
         bad.parameters[0].value = f64::INFINITY;
         assert!(save(&path, &bad, None).is_err());
         assert_eq!(open(&path).unwrap().document, part());
+        // The original file's permissions survive a save.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+            save(&path, &part(), None).unwrap();
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o640);
+        }
         // No temp files left behind.
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
