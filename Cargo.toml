@@ -11,6 +11,7 @@ repository = "https://github.com/eltorr3s/solidmodeler"
 [workspace.dependencies]
 sm-document = { path = "crates/sm-document" }
 sm-format = { path = "crates/sm-format" }
+sm-history = { path = "crates/sm-history" }
 sm-kernel = { path = "crates/sm-kernel" }
 sm-step = { path = "crates/sm-step" }
 serde = { version = "1", features = ["derive"] }

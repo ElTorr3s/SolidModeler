@@ -30,3 +30,9 @@ Linux/Wayland with first-class Omarchy support.
    whatever version is checked out. Edits to different features merge
    automatically; edits to the same feature need a manual pick. Depends on
    robust topological naming, so references like "this face" survive a merge.
+   - Done (first version): version graph stored in `.smp`, branches, tags,
+     checkout, three-way feature-level merge with conflict reporting, and
+     `smcli` commands. See `docs/versioning.md`.
+   - Next: local project manager in the style of Onshape (project folders,
+     project-wide releases, where-used across parts and assemblies, a
+     version manager UI).

@@ -1,5 +1,10 @@
 //! `smcli demo <out.smp>`              write a sample part (block, pocket, notch)
 //! `smcli rebuild <in.smp> [out.step]` replay the history, report bodies, optionally export STEP
+//!
+//! Version commands (commit, log, branch, tag, checkout, merge) are in
+//! `history.rs`.
+
+mod history;
 
 use sm_document::{
     BodyOperation, Extrude, ExtrudeExtent, FeatureKind, LengthUnit, OriginPlane, PartDocument,
@@ -21,10 +26,14 @@ fn main() -> ExitCode {
         ["demo", out] => demo(out),
         ["rebuild", input] => rebuild(input, None),
         ["rebuild", input, step] => rebuild(input, Some(step)),
-        _ => {
-            eprintln!("usage: smcli demo <out.smp> | smcli rebuild <in.smp> [out.step]");
-            return ExitCode::from(2);
-        }
+        other => match history::run(other) {
+            Some(result) => result,
+            None => {
+                eprintln!("usage: smcli demo <out.smp> | smcli rebuild <in.smp> [out.step]");
+                eprintln!("       {}", history::USAGE);
+                return ExitCode::from(2);
+            }
+        },
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

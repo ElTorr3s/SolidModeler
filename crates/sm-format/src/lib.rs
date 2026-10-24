@@ -5,6 +5,7 @@
 //! ```text
 //! manifest.json      format id, version, and the hash of document.json
 //! document.json      the PartDocument (parameters + feature history)
+//! history.json       optional versions, branches and tags (see sm-history)
 //! cache/model.step   optional geometry cache, valid only if its hash matches
 //! ```
 //!
@@ -13,6 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 use sm_document::PartDocument;
+use sm_history::History;
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, Write};
 use std::path::Path;
@@ -26,6 +28,7 @@ pub const FORMAT_VERSION: u32 = 1;
 
 const MANIFEST: &str = "manifest.json";
 const DOCUMENT: &str = "document.json";
+const HISTORY: &str = "history.json";
 const CACHE_STEP: &str = "cache/model.step";
 
 /// Largest uncompressed size accepted for each entry. Zip entries can
@@ -33,6 +36,9 @@ const CACHE_STEP: &str = "cache/model.step";
 pub const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 pub const MAX_DOCUMENT_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
+/// Every version is a full snapshot of the document, so this is larger than
+/// the document limit.
+pub const MAX_HISTORY_BYTES: u64 = 256 * 1024 * 1024;
 
 const GENERATOR: &str = concat!("SolidModeller ", env!("CARGO_PKG_VERSION"));
 
@@ -79,6 +85,9 @@ pub struct Manifest {
 pub struct SmpFile {
     pub manifest: Manifest,
     pub document: PartDocument,
+    /// Versions, branches and tags, if the part has any. `document` is the
+    /// open state, which may have changes not yet recorded as a version.
+    pub history: Option<History>,
     /// Cached STEP geometry, present only if it matches the document and
     /// this build. Treat it as untrusted input like any other STEP file.
     pub cached_step: Option<String>,
@@ -88,6 +97,16 @@ pub struct SmpFile {
 /// written to a temporary file next to it, flushed to disk, and then renamed
 /// over the original in one step.
 pub fn save(path: &Path, doc: &PartDocument, cached_step: Option<&str>) -> Result<(), FormatError> {
+    save_with_history(path, doc, None, cached_step)
+}
+
+/// [`save`], also storing the part's version history.
+pub fn save_with_history(
+    path: &Path,
+    doc: &PartDocument,
+    history: Option<&History>,
+    cached_step: Option<&str>,
+) -> Result<(), FormatError> {
     let dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -99,7 +118,7 @@ pub fn save(path: &Path, doc: &PartDocument, cached_step: Option<&str>) -> Resul
     let result = (|| {
         let file = File::create(&tmp)?;
         let mut out = BufWriter::new(file);
-        write(&mut out, doc, cached_step)?;
+        write_with_history(&mut out, doc, history, cached_step)?;
         out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
         std::fs::rename(&tmp, path)?;
         // Make the rename itself durable.
@@ -122,6 +141,16 @@ pub fn open(path: &Path) -> Result<SmpFile, FormatError> {
 pub fn write<W: Write + Seek>(
     out: W,
     doc: &PartDocument,
+    cached_step: Option<&str>,
+) -> Result<(), FormatError> {
+    write_with_history(out, doc, None, cached_step)
+}
+
+/// [`write`], also storing the part's version history.
+pub fn write_with_history<W: Write + Seek>(
+    out: W,
+    doc: &PartDocument,
+    history: Option<&History>,
     cached_step: Option<&str>,
 ) -> Result<(), FormatError> {
     // Never write a file that can't be read back.
@@ -149,6 +178,15 @@ pub fn write<W: Write + Seek>(
     zip.write_all(&manifest)?;
     zip.start_file(DOCUMENT, options)?;
     zip.write_all(&document)?;
+    if let Some(history) = history {
+        // Pretty-printed so a version of the history diffs line by line.
+        let json = serde_json::to_vec_pretty(history).map_err(|source| FormatError::Json {
+            file: HISTORY,
+            source,
+        })?;
+        zip.start_file(HISTORY, options)?;
+        zip.write_all(&json)?;
+    }
     if let Some(step) = cached_step {
         zip.start_file(CACHE_STEP, options)?;
         zip.write_all(step.as_bytes())?;
@@ -189,6 +227,21 @@ pub fn read<R: Read + Seek>(input: R) -> Result<SmpFile, FormatError> {
     document.repair_ids();
     document.validate()?;
 
+    // A broken history is an error rather than silently dropped: saving
+    // the file again would otherwise throw every version away.
+    let history = match zip.index_for_name(HISTORY) {
+        None => None,
+        Some(_) => {
+            let bytes = read_entry(&mut zip, HISTORY, MAX_HISTORY_BYTES)?;
+            Some(
+                serde_json::from_slice(&bytes).map_err(|source| FormatError::Json {
+                    file: HISTORY,
+                    source,
+                })?,
+            )
+        }
+    };
+
     // Trust the cache only if it was built by this build from the document
     // actually stored. Anything else (stale, missing, unreadable, not UTF-8)
     // just means a rebuild.
@@ -203,6 +256,7 @@ pub fn read<R: Read + Seek>(input: R) -> Result<SmpFile, FormatError> {
     Ok(SmpFile {
         manifest,
         document,
+        history,
         cached_step,
     })
 }
@@ -424,6 +478,43 @@ mod tests {
         assert!(matches!(
             write(&mut buf, &doc, None),
             Err(FormatError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn history_round_trip() {
+        let doc = part();
+        let mut history = History::new(&doc, "Initial", 1).unwrap();
+        let mut edited = doc.clone();
+        edited.parameters[0].value = 0.75;
+        history.commit(&edited, "Deeper", 2).unwrap();
+        history.create_branch("experiment", "main").unwrap();
+
+        let mut buf = Cursor::new(Vec::new());
+        write_with_history(&mut buf, &edited, Some(&history), None).unwrap();
+        buf.set_position(0);
+        let file = read(buf).unwrap();
+        assert_eq!(file.document, edited);
+        assert_eq!(file.history.as_ref(), Some(&history));
+
+        // Files without a history still open, with none.
+        assert!(read(to_bytes(&doc, None)).unwrap().history.is_none());
+    }
+
+    #[test]
+    fn broken_history_is_an_error_not_dropped() {
+        let mut buf = to_bytes(&part(), None);
+        let manifest = entry(&mut buf, MANIFEST);
+        let document = entry(&mut buf, DOCUMENT);
+        let history = br#"{"head":{"branch":"main"},"branches":{},"versions":[]}"#;
+        let result = read(archive(&[
+            (MANIFEST, &manifest),
+            (DOCUMENT, &document),
+            (HISTORY, history),
+        ]));
+        assert!(matches!(
+            result,
+            Err(FormatError::Json { file: HISTORY, .. })
         ));
     }
 

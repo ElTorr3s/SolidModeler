@@ -15,6 +15,7 @@ An `.smp` file is a zip archive (Deflate) with these entries:
 |---|---|---|---|
 | `manifest.json` | yes | 64 KiB | Format id, version, generator, hashes. Always the first entry. |
 | `document.json` | yes | 64 MiB | The `PartDocument`: units, parameters, feature history, end-of-part marker |
+| `history.json` | no | 256 MiB | Versions, branches and tags of the part. See `docs/versioning.md`. |
 | `cache/model.step` | no | 1 GiB | STEP of the rebuilt geometry, so a file can be shown without a rebuild |
 
 Readers enforce the size limits while decompressing (not from the declared
@@ -71,7 +72,10 @@ These change the format, so they are decisions for the project owner:
 2. **Cache contents.** A STEP cache still has to be parsed and tessellated to
    be shown. A binary mesh cache (positions, normals, indices, per-face
    ranges) would open much faster; STEP would remain export-only.
-3. **Branching and merging.** The feature tree should stay plain, stable,
-   diff-friendly JSON so versions can be compared and merged at the feature
-   level (see the roadmap). That argues for keeping all derived data in
-   `cache/` and treating it as disposable.
+3. **Branching and merging.** The first version is implemented: an optional
+   `history.json` holds snapshots of the feature tree and merges work at the
+   feature level. Its own open decisions (snapshots or an operation log,
+   history inside the file or in a project store) are listed in
+   `docs/versioning.md`. The feature tree should stay plain, stable,
+   diff-friendly JSON, which argues for keeping all derived data in `cache/`
+   and treating it as disposable.

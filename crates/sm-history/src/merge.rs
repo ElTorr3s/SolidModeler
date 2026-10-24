@@ -1,0 +1,436 @@
+//! Three-way merge of two versions of a part at the feature level.
+//!
+//! Features are matched by id, parameters by name. Each feature merges field
+//! by field (name, suppressed, definition), so renaming a feature on one
+//! branch and changing its distance on the other combines cleanly. A field
+//! changed differently on both sides, or a feature deleted on one side and
+//! changed on the other, is a conflict: the merge keeps our side and reports
+//! it, and the caller can pick the other side through [`Resolutions`].
+
+use serde::{Deserialize, Serialize};
+use sm_document::{DocumentError, Feature, FeatureId, PartDocument};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
+
+/// Which side of a merge to take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
+    Ours,
+    Theirs,
+}
+
+/// The part of a feature a conflict is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeatureField {
+    /// Deleted on one side and changed on the other.
+    Existence,
+    Name,
+    Suppressed,
+    /// The feature's definition (sketch geometry, extrude extent, ...).
+    Definition,
+}
+
+/// Names one decision in a merge. Conflicts are reported and resolved by key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "on", rename_all = "snake_case")]
+pub enum ConflictKey {
+    DocumentName,
+    Units,
+    EndOfPart,
+    /// Both sides reordered the features they share, differently.
+    Order,
+    Parameter {
+        name: String,
+    },
+    /// `id` is the feature's id in the merged document.
+    Feature {
+        id: FeatureId,
+        field: FeatureField,
+    },
+}
+
+impl fmt::Display for ConflictKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConflictKey::DocumentName => write!(f, "part name"),
+            ConflictKey::Units => write!(f, "units"),
+            ConflictKey::EndOfPart => write!(f, "end of part"),
+            ConflictKey::Order => write!(f, "feature order"),
+            ConflictKey::Parameter { name } => write!(f, "parameter {name}"),
+            ConflictKey::Feature { id, field } => {
+                let field = match field {
+                    FeatureField::Existence => "deleted on one side, changed on the other",
+                    FeatureField::Name => "name",
+                    FeatureField::Suppressed => "suppressed",
+                    FeatureField::Definition => "definition",
+                };
+                write!(f, "feature {} {field}", id.0)
+            }
+        }
+    }
+}
+
+/// Picks for conflicts, by key. Keys that aren't conflicts are ignored.
+pub type Resolutions = BTreeMap<ConflictKey, Side>;
+
+/// One unresolved conflict, with each side's value as JSON for display.
+/// `None` means the item doesn't exist on that side.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Conflict {
+    pub key: ConflictKey,
+    pub base: Option<serde_json::Value>,
+    pub ours: Option<serde_json::Value>,
+    pub theirs: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeResult {
+    /// The merged part. Unresolved conflicts take our side, or the side
+    /// named in the resolutions.
+    pub document: PartDocument,
+    /// Conflicts that the resolutions didn't settle.
+    pub conflicts: Vec<Conflict>,
+    /// Features both sides added under the same id: their side's feature was
+    /// given a new id, `(old, new)`. Their references were updated to match.
+    pub renumbered: Vec<(FeatureId, FeatureId)>,
+    /// Set when the merged part is not a valid document even though every
+    /// field merged, for example their new extrude uses a sketch we deleted.
+    /// It has to be fixed by hand before the merge can be committed.
+    pub invalid: Option<DocumentError>,
+}
+
+impl MergeResult {
+    /// True if the result can be committed as is.
+    pub fn is_clean(&self) -> bool {
+        self.conflicts.is_empty() && self.invalid.is_none()
+    }
+}
+
+/// Merges `ours` and `theirs`, two descendants of `base`.
+pub fn merge3(
+    base: &PartDocument,
+    ours: &PartDocument,
+    theirs: &PartDocument,
+    resolutions: &Resolutions,
+) -> MergeResult {
+    let (theirs, renumbered) = renumber_colliding(base, ours, theirs);
+    let mut m = Merger {
+        resolutions,
+        conflicts: Vec::new(),
+    };
+
+    let name = m.pick(
+        ConflictKey::DocumentName,
+        &base.name,
+        &ours.name,
+        &theirs.name,
+    );
+    let units = m.pick(ConflictKey::Units, &base.units, &ours.units, &theirs.units);
+    let parameters = m.parameters(base, ours, &theirs);
+    let features = m.features(base, ours, &theirs);
+    let end_of_part = m.pick(
+        ConflictKey::EndOfPart,
+        &base.end_of_part,
+        &ours.end_of_part,
+        &theirs.end_of_part,
+    );
+
+    // Start from ours so private bookkeeping (the id counter) carries over,
+    // then make sure the counter is above every id either side has used.
+    let mut document = ours.clone();
+    document.name = name;
+    document.units = units;
+    document.parameters = parameters;
+    document.features = features;
+    document.end_of_part = end_of_part;
+    document.repair_ids();
+    let invalid = document.validate().err();
+
+    MergeResult {
+        document,
+        conflicts: m.conflicts,
+        renumbered,
+        invalid,
+    }
+}
+
+struct Merger<'a> {
+    resolutions: &'a Resolutions,
+    conflicts: Vec<Conflict>,
+}
+
+impl Merger<'_> {
+    /// Standard three-way pick of one value.
+    fn pick<T: Clone + PartialEq + Serialize>(
+        &mut self,
+        key: ConflictKey,
+        base: &T,
+        ours: &T,
+        theirs: &T,
+    ) -> T {
+        if ours == theirs || theirs == base {
+            return ours.clone();
+        }
+        if ours == base {
+            return theirs.clone();
+        }
+        self.conflict(key, Some(base), Some(ours), Some(theirs), ours, theirs)
+    }
+
+    /// Three-way pick of something that may not exist on every side.
+    fn pick_opt<T: Clone + PartialEq + Serialize>(
+        &mut self,
+        key: ConflictKey,
+        base: Option<&T>,
+        ours: Option<&T>,
+        theirs: Option<&T>,
+    ) -> Option<T> {
+        if ours == theirs || theirs == base {
+            return ours.cloned();
+        }
+        if ours == base {
+            return theirs.cloned();
+        }
+        self.conflict(key, base, ours, theirs, &ours, &theirs)
+            .cloned()
+    }
+
+    fn conflict<V: Serialize, T: Clone>(
+        &mut self,
+        key: ConflictKey,
+        base: Option<&V>,
+        ours: Option<&V>,
+        theirs: Option<&V>,
+        ours_value: &T,
+        theirs_value: &T,
+    ) -> T {
+        if let Some(side) = self.resolutions.get(&key) {
+            return match side {
+                Side::Ours => ours_value.clone(),
+                Side::Theirs => theirs_value.clone(),
+            };
+        }
+        let json = |v: Option<&V>| v.map(|v| serde_json::to_value(v).expect("serializable"));
+        self.conflicts.push(Conflict {
+            key,
+            base: json(base),
+            ours: json(ours),
+            theirs: json(theirs),
+        });
+        ours_value.clone()
+    }
+
+    /// Parameters merge by name, each as a whole (value and comment). Order
+    /// is ours, with their new parameters appended in their order.
+    fn parameters(
+        &mut self,
+        base: &PartDocument,
+        ours: &PartDocument,
+        theirs: &PartDocument,
+    ) -> Vec<sm_document::Parameter> {
+        fn find<'a>(doc: &'a PartDocument, name: &str) -> Option<&'a sm_document::Parameter> {
+            doc.parameters.iter().find(|p| p.name == name)
+        }
+        let mut names: Vec<&str> = Vec::new();
+        for p in ours
+            .parameters
+            .iter()
+            .chain(&theirs.parameters)
+            .chain(&base.parameters)
+        {
+            if !names.contains(&p.name.as_str()) {
+                names.push(&p.name);
+            }
+        }
+        names
+            .into_iter()
+            .filter_map(|name| {
+                self.pick_opt(
+                    ConflictKey::Parameter { name: name.into() },
+                    find(base, name),
+                    find(ours, name),
+                    find(theirs, name),
+                )
+            })
+            .collect()
+    }
+
+    fn features(
+        &mut self,
+        base: &PartDocument,
+        ours: &PartDocument,
+        theirs: &PartDocument,
+    ) -> Vec<Feature> {
+        fn index(doc: &PartDocument) -> HashMap<FeatureId, &Feature> {
+            doc.features.iter().map(|f| (f.id, f)).collect()
+        }
+        let (b, o, t) = (index(base), index(ours), index(theirs));
+
+        let mut merged: HashMap<FeatureId, Feature> = HashMap::new();
+        let mut ids: Vec<FeatureId> = b.keys().chain(o.keys()).chain(t.keys()).copied().collect();
+        ids.sort();
+        ids.dedup();
+        for id in ids {
+            let (fb, fo, ft) = (
+                b.get(&id).copied(),
+                o.get(&id).copied(),
+                t.get(&id).copied(),
+            );
+            let feature = match (fb, fo, ft) {
+                (Some(fb), Some(fo), Some(ft)) => Some(self.feature_fields(fb, fo, ft)),
+                _ => self.pick_opt(
+                    ConflictKey::Feature {
+                        id,
+                        field: FeatureField::Existence,
+                    },
+                    fb,
+                    fo,
+                    ft,
+                ),
+            };
+            if let Some(feature) = feature {
+                merged.insert(id, feature);
+            }
+        }
+
+        let order = self.order(base, ours, theirs, &merged);
+        order
+            .into_iter()
+            .map(|id| merged.remove(&id).expect("ordered ids are merged ids"))
+            .collect()
+    }
+
+    fn feature_fields(&mut self, b: &Feature, o: &Feature, t: &Feature) -> Feature {
+        let key = |field| ConflictKey::Feature { id: o.id, field };
+        Feature {
+            id: o.id,
+            name: self.pick(key(FeatureField::Name), &b.name, &o.name, &t.name),
+            suppressed: self.pick(
+                key(FeatureField::Suppressed),
+                &b.suppressed,
+                &o.suppressed,
+                &t.suppressed,
+            ),
+            kind: self.pick(key(FeatureField::Definition), &b.kind, &o.kind, &t.kind),
+        }
+    }
+
+    /// Orders the merged features. If only one side reordered the features
+    /// all three versions share, its order wins; if both did, differently,
+    /// that's a conflict. Features only one side has are then inserted after
+    /// the feature they followed on that side.
+    fn order(
+        &mut self,
+        base: &PartDocument,
+        ours: &PartDocument,
+        theirs: &PartDocument,
+        merged: &HashMap<FeatureId, Feature>,
+    ) -> Vec<FeatureId> {
+        let ids = |doc: &PartDocument| -> HashSet<FeatureId> {
+            doc.features.iter().map(|f| f.id).collect()
+        };
+        let (ib, io, it) = (ids(base), ids(ours), ids(theirs));
+        let shared = |doc: &PartDocument| -> Vec<FeatureId> {
+            doc.features
+                .iter()
+                .map(|f| f.id)
+                .filter(|id| ib.contains(id) && io.contains(id) && it.contains(id))
+                .collect()
+        };
+        let (sb, so, st) = (shared(base), shared(ours), shared(theirs));
+        let primary_is_theirs = if so == st || st == sb {
+            false
+        } else if so == sb {
+            true
+        } else {
+            self.conflict(
+                ConflictKey::Order,
+                Some(&sb),
+                Some(&so),
+                Some(&st),
+                &false,
+                &true,
+            )
+        };
+        let (primary, other) = if primary_is_theirs {
+            (theirs, ours)
+        } else {
+            (ours, theirs)
+        };
+
+        let mut order: Vec<FeatureId> = primary
+            .features
+            .iter()
+            .map(|f| f.id)
+            .filter(|id| merged.contains_key(id))
+            .collect();
+        // When both sides added features at the same spot, the primary
+        // side's come first, so skip past features the other side lacks.
+        let in_other: HashSet<FeatureId> = other.features.iter().map(|f| f.id).collect();
+        let mut placed: HashSet<FeatureId> = order.iter().copied().collect();
+        let mut anchor: Option<FeatureId> = None;
+        for id in other.features.iter().map(|f| f.id) {
+            if !merged.contains_key(&id) {
+                continue;
+            }
+            if !placed.contains(&id) {
+                let mut at = anchor.map_or(0, |a| order.iter().position(|x| *x == a).unwrap() + 1);
+                while at < order.len() && !in_other.contains(&order[at]) {
+                    at += 1;
+                }
+                order.insert(at, id);
+                placed.insert(id);
+            }
+            anchor = Some(id);
+        }
+        // Every merged feature exists on at least one side, so all are placed.
+        debug_assert_eq!(order.len(), merged.len());
+        order
+    }
+}
+
+/// Feature ids are handed out per document, so two branches that each add a
+/// feature usually give it the same id. Their side's colliding features get
+/// fresh ids, and every reference to them on their side is rewritten.
+fn renumber_colliding(
+    base: &PartDocument,
+    ours: &PartDocument,
+    theirs: &PartDocument,
+) -> (PartDocument, Vec<(FeatureId, FeatureId)>) {
+    let mut next = base
+        .next_id()
+        .0
+        .max(ours.next_id().0)
+        .max(theirs.next_id().0);
+    let mut map: HashMap<FeatureId, FeatureId> = HashMap::new();
+    let mut renumbered = Vec::new();
+    for t in &theirs.features {
+        if base.feature(t.id).is_some() {
+            continue;
+        }
+        match ours.feature(t.id) {
+            // Both added exactly the same feature: treat it as one.
+            Some(o) if o == t => {}
+            Some(_) => {
+                let new = FeatureId(next);
+                next = next.checked_add(1).expect("feature ids exhausted");
+                map.insert(t.id, new);
+                renumbered.push((t.id, new));
+            }
+            None => {}
+        }
+    }
+    if map.is_empty() {
+        return (theirs.clone(), renumbered);
+    }
+    let remap = |id: FeatureId| map.get(&id).copied().unwrap_or(id);
+    let mut theirs = theirs.clone();
+    for f in &mut theirs.features {
+        f.id = remap(f.id);
+        f.kind.remap_references(remap);
+    }
+    theirs.end_of_part = theirs.end_of_part.map(remap);
+    (theirs, renumbered)
+}

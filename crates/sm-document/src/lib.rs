@@ -79,6 +79,26 @@ pub enum FeatureKind {
     Extrude(Extrude),
 }
 
+impl FeatureKind {
+    /// Ids of the earlier features this one depends on.
+    pub fn references(&self) -> Vec<FeatureId> {
+        match self {
+            FeatureKind::Sketch(_) => Vec::new(),
+            FeatureKind::Extrude(e) => vec![e.sketch],
+        }
+    }
+
+    /// Rewrites every feature reference through `map`. Merging uses this to
+    /// renumber features two branches added under the same id, so every new
+    /// kind of reference must be handled here.
+    pub fn remap_references(&mut self, mut map: impl FnMut(FeatureId) -> FeatureId) {
+        match self {
+            FeatureKind::Sketch(_) => {}
+            FeatureKind::Extrude(e) => e.sketch = map(e.sketch),
+        }
+    }
+}
+
 /// The three origin planes every part starts with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -138,7 +158,7 @@ pub enum ExtrudeExtent {
     Symmetric { distance: f64 },
 }
 
-#[derive(Debug, thiserror::Error, PartialEq)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq)]
 pub enum DocumentError {
     #[error("feature {0:?} does not exist")]
     MissingFeature(FeatureId),
@@ -188,6 +208,12 @@ impl PartDocument {
     pub fn repair_ids(&mut self) {
         let max = self.features.iter().map(|f| f.id.0).max().unwrap_or(0);
         self.next_id = self.next_id.max(max.saturating_add(1));
+    }
+
+    /// The id [`PartDocument::add_feature`] would hand out next.
+    pub fn next_id(&self) -> FeatureId {
+        let max = self.features.iter().map(|f| f.id.0).max().unwrap_or(0);
+        FeatureId(self.next_id.max(max.saturating_add(1)))
     }
 
     pub fn feature(&self, id: FeatureId) -> Option<&Feature> {
@@ -419,5 +445,24 @@ mod tests {
         let json = serde_json::to_string(&doc).unwrap();
         let back: PartDocument = serde_json::from_str(&json).unwrap();
         assert_eq!(doc, back);
+    }
+
+    #[test]
+    fn references_and_remapping() {
+        let mut doc = block();
+        assert!(doc.features[0].kind.references().is_empty());
+        assert_eq!(doc.features[1].kind.references(), [FeatureId(1)]);
+        doc.features[1]
+            .kind
+            .remap_references(|id| FeatureId(id.0 + 10));
+        assert_eq!(doc.features[1].kind.references(), [FeatureId(11)]);
+    }
+
+    #[test]
+    fn next_id_accounts_for_ids_in_use() {
+        let mut doc = block();
+        assert_eq!(doc.next_id(), FeatureId(3));
+        doc.features[0].id = FeatureId(41);
+        assert_eq!(doc.next_id(), FeatureId(42));
     }
 }
