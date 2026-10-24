@@ -14,17 +14,18 @@ An `.smp` file is a zip archive (Deflate) with these entries:
 | Entry | Required | Size limit | Contents |
 |---|---|---|---|
 | `manifest.json` | yes | 64 KiB | Format id, version, generator, hashes. Always the first entry. |
-| `document.json` | yes | 64 MiB | The `PartDocument`: units, parameters, feature history, end-of-part marker |
-| `cache/model.step` | no | 1 GiB | STEP of the rebuilt geometry, so a file can be shown without a rebuild |
+| `document.json` | yes | 8 MiB | The `PartDocument`: units, parameters, feature history, end-of-part marker |
+| `cache/model.step` | no | 256 MiB | STEP of the rebuilt geometry, so a file can be shown without a rebuild |
 
 Readers enforce the size limits while decompressing (not from the declared
 size, which the file's author controls), so a small file can't expand into
 gigabytes of memory. Future versions will add entries (thumbnails,
 appearances, attached files) without changing the ones above.
 
-Writers save atomically: the archive is written to a temporary file in the
-same folder, flushed to disk, and renamed over the old file, so a crash or a
-full disk never destroys the previous version.
+Writers save atomically: the archive is written to a randomly named,
+exclusively created temporary file in the same folder, flushed to disk, and
+renamed over the old file (keeping its permissions), so a crash or a full
+disk never destroys the previous version.
 
 ## manifest.json
 
@@ -55,7 +56,8 @@ The serde serialization of `sm_document::PartDocument`:
 
 - Features refer to each other by stable numeric `id`, never by name or
   position, so renaming and reordering don't break references. A feature may
-  only refer to features earlier in the history. Ids must be unique.
+  only refer to features earlier in the history. Ids must be unique and below
+  `u32::MAX`; a document has at most 100,000 features.
 - `end_of_part` is the rollback marker, stored as the id of the first feature
   *below* it, so it moves with that feature when the history is reordered.
 - All numbers must be finite. Parameter names must be unique identifiers.

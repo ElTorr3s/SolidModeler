@@ -477,6 +477,30 @@ mod tests {
     }
 
     #[test]
+    fn known_limitation_overhanging_flush_join() {
+        // Two overlapping blocks of the same height: tops and bottoms are
+        // coplanar, face the same way, and overhang each other, so no nudge
+        // preserves the shape and truck's boolean fails. Flip this test when
+        // the kernel handles it.
+        let mut doc = PartDocument::new("T", LengthUnit::Mm);
+        add_block(
+            &mut doc,
+            [0.0, 0.0, 10.0, 10.0],
+            0.0,
+            5.0,
+            BodyOperation::Join,
+        );
+        add_block(
+            &mut doc,
+            [5.0, 5.0, 15.0, 15.0],
+            0.0,
+            5.0,
+            BodyOperation::Join,
+        );
+        assert!(matches!(rebuild(&doc), Err(RebuildError::BooleanFailed(_))));
+    }
+
+    #[test]
     fn nested_loops_extrude_as_frame() {
         let mut doc = PartDocument::new("Frame", LengthUnit::Mm);
         add_extrude(
