@@ -36,12 +36,15 @@ pub fn regions(profiles: &[Profile]) -> Result<Vec<Region>, ProfileError> {
         .map(|(i, p)| clean(i, &p.points))
         .collect::<Result<Vec<_>, _>>()?;
 
-    for i in 0..loops.len() {
-        for j in i + 1..loops.len() {
-            if loops_touch(&loops[i], &loops[j]) {
-                return Err(ProfileError::LoopsIntersect(i, j));
-            }
-        }
+    let segments: Vec<_> = loops
+        .iter()
+        .enumerate()
+        .flat_map(|(l, points)| (0..points.len()).map(move |i| (l, edge(points, i))))
+        .collect();
+    let segs: Vec<_> = segments.iter().map(|&(_, seg)| seg).collect();
+    if let Some((a, b)) = touching_pair(&segs, |a, b| segments[a].0 == segments[b].0) {
+        let (i, j) = (segments[a].0, segments[b].0);
+        return Err(ProfileError::LoopsIntersect(i.min(j), i.max(j)));
     }
 
     // Loops don't touch, so one vertex decides containment for the whole loop.
@@ -91,16 +94,11 @@ fn clean(index: usize, points: &[Point2]) -> Result<Vec<Point2>, ProfileError> {
         return Err(ProfileError::TooFewPoints(index));
     }
     let n = out.len();
-    for i in 0..n {
-        // Skip the edge itself and its two neighbours, which share endpoints.
-        for j in i + 2..n {
-            if i == 0 && j == n - 1 {
-                continue;
-            }
-            if segments_touch(edge(&out, i), edge(&out, j)) {
-                return Err(ProfileError::SelfIntersecting(index));
-            }
-        }
+    let segments: Vec<_> = (0..n).map(|i| edge(&out, i)).collect();
+    // Neighbouring edges share an endpoint, so they always "touch".
+    let adjacent = |a: usize, b: usize| a.abs_diff(b) == 1 || a.abs_diff(b) == n - 1;
+    if touching_pair(&segments, adjacent).is_some() {
+        return Err(ProfileError::SelfIntersecting(index));
     }
     if signed_area(&out).abs() <= LINEAR_TOLERANCE * perimeter(&out) {
         return Err(ProfileError::ZeroArea(index));
@@ -143,8 +141,40 @@ fn dist(a: Point2, b: Point2) -> f64 {
     (a[0] - b[0]).hypot(a[1] - b[1])
 }
 
-fn loops_touch(a: &[Point2], b: &[Point2]) -> bool {
-    (0..a.len()).any(|i| (0..b.len()).any(|j| segments_touch(edge(a, i), edge(b, j))))
+/// Finds two segments that touch, ignoring pairs for which `skip` is true.
+/// A sweep over x-sorted bounding boxes keeps this close to O(n log n) for
+/// typical sketches instead of comparing every pair.
+fn touching_pair(
+    segments: &[(Point2, Point2)],
+    skip: impl Fn(usize, usize) -> bool,
+) -> Option<(usize, usize)> {
+    let tol = LINEAR_TOLERANCE;
+    let bounds = |(a, b): (Point2, Point2)| {
+        (
+            a[0].min(b[0]),
+            a[0].max(b[0]),
+            a[1].min(b[1]),
+            a[1].max(b[1]),
+        )
+    };
+    let mut order: Vec<usize> = (0..segments.len()).collect();
+    order.sort_by(|&i, &j| bounds(segments[i]).0.total_cmp(&bounds(segments[j]).0));
+    for (k, &i) in order.iter().enumerate() {
+        let (_, x1, y0, y1) = bounds(segments[i]);
+        for &j in &order[k + 1..] {
+            let (jx0, _, jy0, jy1) = bounds(segments[j]);
+            if jx0 > x1 + tol {
+                break;
+            }
+            if jy0 > y1 + tol || y0 > jy1 + tol || skip(i, j) {
+                continue;
+            }
+            if segments_touch(segments[i], segments[j]) {
+                return Some((i, j));
+            }
+        }
+    }
+    None
 }
 
 /// Even-odd point-in-polygon test.
@@ -230,6 +260,24 @@ mod tests {
             regions(&[square(0.0, 0.0, 2.0), square(1.0, 1.0, 2.0)]),
             Err(ProfileError::LoopsIntersect(0, 1))
         );
+    }
+
+    #[test]
+    fn large_loops_are_fast() {
+        let n = crate::MAX_SKETCH_POINTS / 2;
+        let circle = |r: f64| Profile {
+            points: (0..n)
+                .map(|i| {
+                    let a = i as f64 / n as f64 * std::f64::consts::TAU;
+                    [r * a.cos(), r * a.sin()]
+                })
+                .collect(),
+        };
+        let start = std::time::Instant::now();
+        let r = regions(&[circle(10.0), circle(5.0)]).unwrap();
+        assert_eq!(r[0].holes.len(), 1);
+        // Pairwise checks took seconds here; the sweep takes milliseconds.
+        assert!(start.elapsed().as_secs_f64() < 1.0, "{:?}", start.elapsed());
     }
 
     #[test]

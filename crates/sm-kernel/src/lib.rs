@@ -80,6 +80,7 @@ pub fn rebuild(doc: &PartDocument) -> Result<Model, RebuildError> {
         bodies: Vec::new(),
     };
     let mut tools = 0usize;
+    let mut region_cache: HashMap<FeatureId, Vec<profile::Region>> = HashMap::new();
     for feature in doc.active_features() {
         let id = feature.id;
         match &feature.kind {
@@ -94,21 +95,34 @@ pub fn rebuild(doc: &PartDocument) -> Result<Model, RebuildError> {
                 let sketch = sketches
                     .get(&extrude.sketch)
                     .ok_or(RebuildError::InactiveSketch(extrude.sketch))?;
-                let regions = profile::regions(&sketch.profiles)
-                    .map_err(|e| RebuildError::Profile(extrude.sketch, e))?;
+                // Several features often use one sketch; find its regions once.
+                let regions = match region_cache.entry(extrude.sketch) {
+                    std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(e) => e.insert(
+                        profile::regions(&sketch.profiles)
+                            .map_err(|err| RebuildError::Profile(extrude.sketch, err))?,
+                    ),
+                };
                 tools += regions.len();
                 if tools > MAX_TOOLS {
                     return Err(RebuildError::TooManyTools(id));
                 }
                 let (start, length) = span(id, &extrude.extent)?;
                 let frame = plane_frame(sketch.plane, sketch.offset);
-                for region in &regions {
-                    let target = match extrude.operation {
-                        BodyOperation::NewBody => None,
-                        op => model.bodies.first().map(|b| (&b.solid, op)),
-                    };
-                    let tool = extrude::tool(&frame, region, start, length, target)
-                        .ok_or(RebuildError::InvalidFace(id))?;
+                // Flush-face detection only needs the body as it was before
+                // this feature: its regions don't touch each other.
+                let planes = match extrude.operation {
+                    BodyOperation::Join | BodyOperation::Cut => model
+                        .bodies
+                        .first()
+                        .map(|b| extrude::target_planes(&b.solid))
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                for region in regions.iter() {
+                    let tool =
+                        extrude::tool(&frame, region, start, length, &planes, extrude.operation)
+                            .ok_or(RebuildError::InvalidFace(id))?;
                     apply(&mut model, id, extrude.operation, tool)?;
                 }
             }
