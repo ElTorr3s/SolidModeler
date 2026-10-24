@@ -990,6 +990,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sm-naming"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sm-document",
+ "sm-kernel",
+ "truck-modeling",
+]
+
+[[package]]
 name = "sm-step"
 version = "0.1.0"
 dependencies = [

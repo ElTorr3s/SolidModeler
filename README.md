@@ -20,6 +20,7 @@ exported to STEP. There is no GUI yet.
 |---|---|
 | `crates/sm-document` | Part document: parameters and ordered feature history, rollback marker |
 | `crates/sm-kernel` | Replays the history into B-rep solids using [`truck`](https://github.com/ricosjp/truck) |
+| `crates/sm-naming` | Persistent face/edge/vertex names that survive rebuilds ([design](docs/topological-naming.md)) |
 | `crates/sm-format` | Reads and writes `.smp` files ([spec](docs/smp-format.md)) |
 | `crates/sm-step` | STEP export (geometry only) |
 | `apps/smcli` | Command-line driver until the GUI exists |
