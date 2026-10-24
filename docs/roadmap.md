@@ -16,3 +16,6 @@ Long-term goal: professional use with Autodesk Inventor feature parity.
    portal `color-scheme` setting, and colors from the active Omarchy theme,
    updated live when the user switches themes. Falls back to plain light and
    dark themes on other desktops.
+
+Progress against Inventor and SolidWorks, feature by feature, is tracked in
+[feature-parity.md](feature-parity.md), which also proposes the steps after 4.
