@@ -1,0 +1,14 @@
+[package]
+name = "sm-kernel"
+description = "Replays a part's feature history into B-rep solids using truck"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sm-document.workspace = true
+thiserror.workspace = true
+truck-modeling.workspace = true
+
+[dev-dependencies]
+truck-topology = "0.6"

@@ -1,0 +1,11 @@
+[package]
+name = "sm-step"
+description = "STEP (ISO 10303-21) export of rebuilt solids"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sm-kernel.workspace = true
+truck-modeling.workspace = true
+truck-stepio.workspace = true

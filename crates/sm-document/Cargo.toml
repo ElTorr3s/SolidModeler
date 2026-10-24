@@ -1,0 +1,13 @@
+[package]
+name = "sm-document"
+description = "Parametric part document: parameters and the ordered feature history"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

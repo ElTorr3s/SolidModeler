@@ -1,0 +1,13 @@
+[package]
+name = "sm-format"
+description = "Reads and writes the native .smp part file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sm-document.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zip.workspace = true
