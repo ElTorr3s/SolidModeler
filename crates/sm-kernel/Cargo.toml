@@ -9,6 +9,7 @@ license.workspace = true
 sm-document.workspace = true
 thiserror.workspace = true
 truck-modeling.workspace = true
+truck-shapeops.workspace = true
 
 [dev-dependencies]
 truck-topology = "0.6"
