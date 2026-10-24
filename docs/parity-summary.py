@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Regenerate the summary table in docs/feature-parity.md.
 
-Counts the rows under each `## ` section and rewrites the block between the
+Counts the rows of the tables headed Inventor or Onshape under each `## `
+section and rewrites the block between the
 summary markers. Run it after changing any status.
 """
 
@@ -18,19 +19,27 @@ def main() -> None:
     text = DOC.read_text()
     sections: dict[str, dict[str, int]] = {}
     current = None
+    onshape_table = False
     for line in text.splitlines():
         if line.startswith("## "):
             title = line[3:].strip()
             current = None if title in SKIP else sections.setdefault(title, {})
             continue
-        if current is None or not line.startswith("| ") or line.startswith("| Inventor"):
+        if current is None or not line.startswith("| "):
             continue
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cells) != 5:
+        if cells[0] in ("Inventor", "Onshape"):
+            onshape_table = cells[0] == "Onshape"
             continue
-        inv, sw, _step, status, _notes = cells
+        if len(cells) == 6 and onshape_table:
+            onshape, inv, sw, _step, status, _notes = cells
+        elif len(cells) == 5 and not onshape_table:
+            onshape, (inv, sw, _step, status, _notes) = NONE, cells
+        else:
+            continue
         key = (
-            "both" if inv != NONE and sw != NONE
+            "onshape" if onshape != NONE
+            else "both" if inv != NONE and sw != NONE
             else "inventor" if inv != NONE
             else "solidworks" if sw != NONE
             else "own"
@@ -40,9 +49,10 @@ def main() -> None:
 
     cols = [
         ("items", "Items"),
-        ("both", "In both"),
+        ("both", "Inventor and SolidWorks"),
         ("inventor", "Inventor only"),
         ("solidworks", "SolidWorks only"),
+        ("onshape", "From Onshape"),
         ("own", "Ours only"),
         ("done", "Done"),
         ("in progress", "In progress"),
