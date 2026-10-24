@@ -3,6 +3,7 @@
 //! Features combine their new volume with the part body using
 //! [`BodyOperation`], like Inventor's Join / Cut / Intersect / New Solid.
 
+pub mod curves;
 mod extrude;
 pub mod profile;
 
@@ -171,6 +172,7 @@ fn apply(
         .ok()
         .flatten()
         .ok_or(RebuildError::BooleanFailed(id))?;
+    let solid = curves::straighten(&solid);
     if solid.boundaries().is_empty() {
         // Cut or Intersect consumed the whole body.
         model.bodies.remove(0);
