@@ -9,6 +9,6 @@ license.workspace = true
 sm-document.workspace = true
 thiserror.workspace = true
 truck-modeling.workspace = true
-
-[dev-dependencies]
+truck-shapeops.workspace = true
+truck-meshalgo = { version = "0.4", default-features = false, features = ["tessellation", "analyzers"] }
 truck-topology = "0.6"

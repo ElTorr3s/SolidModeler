@@ -10,9 +10,9 @@ system theme.
 
 ## Status
 
-Step 1 of the [roadmap](docs/roadmap.md): the workspace, the feature history
-model, the `.smp` file format, and a minimal sketch → extrude → STEP pipeline.
-There is no GUI yet.
+Step 2 of the [roadmap](docs/roadmap.md): polyline sketches (with holes)
+extruded with Join / Cut / Intersect / New Solid, saved as `.smp`, and
+exported to STEP. There is no GUI yet.
 
 ## Layout
 
@@ -20,6 +20,7 @@ There is no GUI yet.
 |---|---|
 | `crates/sm-document` | Part document: parameters and ordered feature history, rollback marker |
 | `crates/sm-kernel` | Replays the history into B-rep solids using [`truck`](https://github.com/ricosjp/truck) |
+| `crates/sm-history` | Versions, branches, tags and feature-level merges ([design](docs/versioning.md)) |
 | `crates/sm-format` | Reads and writes `.smp` files ([spec](docs/smp-format.md)) |
 | `crates/sm-step` | STEP export (geometry only) |
 | `apps/smcli` | Command-line driver until the GUI exists |
@@ -28,6 +29,8 @@ There is no GUI yet.
 
 ```sh
 cargo test
-cargo run -p smcli -- demo block.smp            # 40×20×10 mm block
+cargo run -p smcli -- demo block.smp            # block with a pocket and a notch
 cargo run -p smcli -- rebuild block.smp block.step
+cargo run -p smcli -- commit block.smp "Initial"  # start the version history
+cargo run -p smcli -- log block.smp
 ```

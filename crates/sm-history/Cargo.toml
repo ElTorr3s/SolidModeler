@@ -1,0 +1,13 @@
+[package]
+name = "sm-history"
+description = "Versions, branches and feature-level merges of a part's history"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sm-document.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+blake3.workspace = true
+thiserror.workspace = true
