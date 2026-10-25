@@ -7,7 +7,7 @@
 
 use sm_document::{FeatureId, Profile};
 use sm_kernel::profile::{Point2, Region};
-use sm_kernel::Frame;
+use sm_kernel::{Frame, Tolerance};
 use sm_naming_types::{FaceOrigin, FaceRole, SketchEdge};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -88,8 +88,58 @@ pub(crate) fn faces(solid: &Solid) -> impl Iterator<Item = Face> + '_ {
 }
 
 /// Finds the document segment a cleaned region segment came from. The
-/// kernel drops repeated points and may reverse loops, so match endpoints
-/// in either direction within tolerance.
+/// kernel copies sketch points into regions unchanged, so an exact lookup
+/// almost always hits; it drops repeated points and may reverse loops, so
+/// misses fall back to matching endpoints in either direction within
+/// tolerance.
+struct SketchIndex<'a> {
+    profiles: &'a [Profile],
+    exact: HashMap<[u64; 4], SketchEdge>,
+    eps: f64,
+}
+
+impl<'a> SketchIndex<'a> {
+    fn new(profiles: &'a [Profile], eps: f64) -> Self {
+        let mut exact = HashMap::new();
+        for (i, profile) in profiles.iter().enumerate() {
+            let n = profile.points.len();
+            for j in 0..n {
+                let (p, q) = (profile.points[j], profile.points[(j + 1) % n]);
+                let edge = SketchEdge {
+                    profile: i as u32,
+                    segment: j as u32,
+                };
+                // First segment wins, as in the linear scan.
+                exact.entry(bits(p, q)).or_insert(edge);
+                exact.entry(bits(q, p)).or_insert(edge);
+            }
+        }
+        SketchIndex {
+            profiles,
+            exact,
+            eps,
+        }
+    }
+
+    fn find(&self, a: Point2, b: Point2) -> Option<SketchEdge> {
+        if let Some(&edge) = self.exact.get(&bits(a, b)) {
+            return Some(edge);
+        }
+        sketch_edge(self.profiles, a, b, self.eps)
+    }
+
+    fn outer_profile(&self, region: &Region) -> Option<u32> {
+        self.find(region.outer[0], region.outer[1])
+            .map(|e| e.profile)
+    }
+}
+
+fn bits(p: Point2, q: Point2) -> [u64; 4] {
+    // Normalise -0.0 so it matches 0.0.
+    let b = |x: f64| (x + 0.0).to_bits();
+    [b(p[0]), b(p[1]), b(q[0]), b(q[1])]
+}
+
 fn sketch_edge(profiles: &[Profile], a: Point2, b: Point2, eps: f64) -> Option<SketchEdge> {
     let near = |p: Point2, q: Point2| (p[0] - q[0]).hypot(p[1] - q[1]) <= eps;
     profiles.iter().enumerate().find_map(|(i, profile)| {
@@ -104,8 +154,116 @@ fn sketch_edge(profiles: &[Profile], a: Point2, b: Point2, eps: f64) -> Option<S
     })
 }
 
-fn outer_profile(profiles: &[Profile], region: &Region, eps: f64) -> Option<u32> {
-    sketch_edge(profiles, region.outer[0], region.outer[1], eps).map(|e| e.profile)
+/// The segments of a region bucketed by outward direction and sorted by
+/// line offset, so each side face only looks at segments on (nearly) its
+/// own line. It returns exactly what a scan over every segment would.
+struct SideIndex {
+    buckets: HashMap<(i64, i64), Vec<Offset>>,
+    /// Bounds how far a matching segment's stored offset can be from the
+    /// face's: flush handling moves faces by up to the flush offset, and
+    /// the stored offset uses the segment's own direction, which may differ
+    /// from the face normal by the matching angle.
+    window: f64,
+}
+
+/// A segment with its line offset along its own outward direction and its
+/// position in the region, which breaks ties as the scan would.
+type Offset = (f64, usize, Point2, Point2);
+
+/// The largest angle (radians) between directions that still match:
+/// `dot > 1 - 1e-9` means `angle < sqrt(2e-9)`.
+const MATCH_ANGLE: f64 = 5e-5;
+
+/// Direction cells are 1e-4 wide; a 3 x 3 neighbourhood covers the
+/// 1e-9 dot-product test used to match directions.
+const DIRECTION_CELLS: f64 = 1e4;
+
+fn direction_cell(n: Point2) -> (i64, i64) {
+    (
+        (n[0] * DIRECTION_CELLS).round() as i64,
+        (n[1] * DIRECTION_CELLS).round() as i64,
+    )
+}
+
+fn outward(a: Point2, b: Point2) -> Point2 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let l = dx.hypot(dy);
+    [dy / l, -dx / l]
+}
+
+fn dot(p: Point2, d: Point2) -> f64 {
+    p[0] * d[0] + p[1] * d[1]
+}
+
+impl SideIndex {
+    fn new(region: &Region, flush: f64) -> Self {
+        let mut buckets: HashMap<(i64, i64), Vec<Offset>> = HashMap::new();
+        let mut radius = 0.0f64;
+        for (i, (a, b)) in segments(region).enumerate() {
+            radius = radius.max(a[0].hypot(a[1]));
+            let n = outward(a, b);
+            buckets
+                .entry(direction_cell(n))
+                .or_default()
+                .push((dot(a, n), i, a, b));
+        }
+        for bucket in buckets.values_mut() {
+            bucket.sort_by(|x, y| x.0.total_cmp(&y.0));
+        }
+        SideIndex {
+            buckets,
+            window: flush + 2.0 * radius * MATCH_ANGLE,
+        }
+    }
+
+    /// The region segment a side face was swept from: same outward
+    /// direction, nearest line (flush handling may have moved the face
+    /// slightly), and a midpoint within the face's extent so collinear
+    /// segments stay apart.
+    fn find(&self, normal: Point2, face: &[Point2]) -> Option<(Point2, Point2)> {
+        // Tool faces sit within the window; a face further out (not built
+        // by this kernel) still gets the nearest segment, just slower.
+        self.search(normal, face, self.window)
+            .or_else(|| self.search(normal, face, f64::INFINITY))
+    }
+
+    fn search(&self, normal: Point2, face: &[Point2], window: f64) -> Option<(Point2, Point2)> {
+        let len = normal[0].hypot(normal[1]);
+        let normal = [normal[0] / len, normal[1] / len];
+        let dir = [-normal[1], normal[0]];
+        let (lo, hi) = face
+            .iter()
+            .map(|&p| dot(p, dir))
+            .fold((f64::MAX, f64::MIN), |(lo, hi), t| (lo.min(t), hi.max(t)));
+        let face_offset = dot(face[0], normal);
+        let (cx, cy) = direction_cell(normal);
+        // (distance, index, segment)
+        let mut best: Option<(f64, usize, Point2, Point2)> = None;
+        for kx in cx - 1..=cx + 1 {
+            for ky in cy - 1..=cy + 1 {
+                let Some(bucket) = self.buckets.get(&(kx, ky)) else {
+                    continue;
+                };
+                let from = bucket.partition_point(|s| s.0 < face_offset - window);
+                for &(offset, i, a, b) in &bucket[from..] {
+                    if offset > face_offset + window {
+                        break;
+                    }
+                    let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+                    if dot(outward(a, b), normal) <= 1.0 - 1e-9
+                        || !(lo..=hi).contains(&dot(mid, dir))
+                    {
+                        continue;
+                    }
+                    let d = (dot(a, normal) - face_offset).abs();
+                    if best.is_none_or(|(bd, bi, _, _)| d < bd || (d == bd && i < bi)) {
+                        best = Some((d, i, a, b));
+                    }
+                }
+            }
+        }
+        best.map(|(_, _, a, b)| (a, b))
+    }
 }
 
 fn segments(region: &Region) -> impl Iterator<Item = (Point2, Point2)> + '_ {
@@ -124,8 +282,8 @@ fn plane_normal(face: &Face) -> Option<Vector3> {
 /// Names the faces of an extrude tool built from `region` of a sketch with
 /// `profiles`, on `frame`. `reversed` is true when the extrude runs against
 /// the sketch normal; the start cap is always the one on the sketch side, so
-/// flipping an extrude's direction keeps its names. `eps` is the part's
-/// linear tolerance, in its own units.
+/// flipping an extrude's direction keeps its names. `tol` is the part's
+/// tolerance, in its own units.
 pub fn extrude_tool(
     feature: FeatureId,
     profiles: &[Profile],
@@ -133,11 +291,13 @@ pub fn extrude_tool(
     frame: &Frame,
     reversed: bool,
     solid: &Solid,
-    eps: f64,
+    tol: Tolerance,
 ) -> FaceOrigins {
+    let sketch = SketchIndex::new(profiles, tol.linear);
+    let sides = SideIndex::new(region, 2.0 * tol.flush_offset() + tol.linear);
     // Without a known outer loop, caps stay unnamed rather than colliding
     // with another region's caps.
-    let profile = outer_profile(profiles, region, eps);
+    let profile = sketch.outer_profile(region);
     let start = profile.map(|profile| FaceRole::StartCap { profile });
     let end = profile.map(|profile| FaceRole::EndCap { profile });
     let (below, above) = if reversed { (end, start) } else { (start, end) };
@@ -155,8 +315,9 @@ pub fn extrude_tool(
             Some(_) => {
                 let n = normal.unwrap();
                 let points: Vec<Point2> = face.vertex_iter().map(|v| to_2d(v.point())).collect();
-                side_segment(region, [n.dot(frame.u), n.dot(frame.v)], &points)
-                    .and_then(|(a, b)| sketch_edge(profiles, a, b, eps))
+                sides
+                    .find([n.dot(frame.u), n.dot(frame.v)], &points)
+                    .and_then(|(a, b)| sketch.find(a, b))
                     .map(|edge| FaceRole::Side { edge, piece: 0 })
             }
             None => None,
@@ -168,34 +329,6 @@ pub fn extrude_tool(
         origins.insert(surface_key(&face), FaceOrigin { feature, role });
     }
     origins
-}
-
-/// The region segment a side face was swept from: same outward direction,
-/// nearest line (flush handling may have moved the face slightly), and a
-/// midpoint within the face's extent so collinear segments stay apart.
-fn side_segment(region: &Region, normal: Point2, face: &[Point2]) -> Option<(Point2, Point2)> {
-    let len = normal[0].hypot(normal[1]);
-    let normal = [normal[0] / len, normal[1] / len];
-    let dir = [-normal[1], normal[0]];
-    let dot = |p: Point2, d: Point2| p[0] * d[0] + p[1] * d[1];
-    let along: Vec<f64> = face.iter().map(|&p| dot(p, dir)).collect();
-    let (lo, hi) = along
-        .iter()
-        .fold((f64::MAX, f64::MIN), |(lo, hi), &t| (lo.min(t), hi.max(t)));
-    let face_offset = dot(face[0], normal);
-    segments(region)
-        .filter(|&(a, b)| {
-            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-            let l = dx.hypot(dy);
-            let side = [dy / l, -dx / l];
-            let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
-            dot(side, normal) > 1.0 - 1e-9 && (lo..=hi).contains(&dot(mid, dir))
-        })
-        .min_by(|&(a, _), &(c, _)| {
-            let da = (dot(a, normal) - face_offset).abs();
-            let dc = (dot(c, normal) - face_offset).abs();
-            da.total_cmp(&dc)
-        })
 }
 
 /// A revolve's axis in model space and its sweep angle in radians
@@ -218,7 +351,8 @@ pub fn revolve_tool(
     solid: &Solid,
     eps: f64,
 ) -> FaceOrigins {
-    let profile = outer_profile(profiles, region, eps);
+    let sketch = SketchIndex::new(profiles, eps);
+    let profile = sketch.outer_profile(region);
     let (dir, angle) = if axis.angle < 0.0 {
         (-axis.direction.normalize(), -axis.angle)
     } else {
@@ -270,7 +404,7 @@ pub fn revolve_tool(
                 let (a, b) = (rh(at(a)), rh(at(b)));
                 points.iter().all(|&p| near(rh(p), a) || near(rh(p), b))
             });
-            if let Some(edge) = segment.and_then(|(a, b)| sketch_edge(profiles, a, b, eps)) {
+            if let Some(edge) = segment.and_then(|(a, b)| sketch.find(a, b)) {
                 // Named below, once all pieces of the face are known.
                 sides.push((edge, mid_angle(&face, &phi), key));
                 continue;
@@ -319,6 +453,111 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use truck_modeling::{builder, Rad, Wire};
+
+    /// The scan `SideIndex` replaces, kept as the reference it must match.
+    fn scan(region: &Region, normal: Point2, face: &[Point2]) -> Option<(Point2, Point2)> {
+        let len = normal[0].hypot(normal[1]);
+        let normal = [normal[0] / len, normal[1] / len];
+        let dir = [-normal[1], normal[0]];
+        let (lo, hi) = face
+            .iter()
+            .map(|&p| dot(p, dir))
+            .fold((f64::MAX, f64::MIN), |(lo, hi), t| (lo.min(t), hi.max(t)));
+        let face_offset = dot(face[0], normal);
+        segments(region)
+            .filter(|&(a, b)| {
+                let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+                dot(outward(a, b), normal) > 1.0 - 1e-9 && (lo..=hi).contains(&dot(mid, dir))
+            })
+            .min_by(|&(a, _), &(c, _)| {
+                let da = (dot(a, normal) - face_offset).abs();
+                let dc = (dot(c, normal) - face_offset).abs();
+                da.total_cmp(&dc)
+            })
+    }
+
+    /// A many-sided star far from the origin, with every other edge split
+    /// into two collinear pieces and a hole of the same shape.
+    fn star(centre: Point2, n: usize) -> Region {
+        let ring = |r0: f64, r1: f64| -> Vec<Point2> {
+            let mut out = Vec::new();
+            for k in 0..2 * n {
+                let t = std::f64::consts::PI * k as f64 / n as f64;
+                let r = if k % 2 == 0 { r0 } else { r1 };
+                let p = [centre[0] + r * t.cos(), centre[1] + r * t.sin()];
+                if k % 4 == 1 {
+                    let q = out.last().copied().unwrap_or(p);
+                    out.push([(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0]);
+                }
+                out.push(p);
+            }
+            out
+        };
+        let mut hole = ring(10.0, 5.0);
+        hole.reverse();
+        Region {
+            outer: ring(100.0, 60.0),
+            holes: vec![hole],
+        }
+    }
+
+    #[test]
+    fn side_index_matches_a_full_scan() {
+        let flush = 2.0 * Tolerance::for_units(sm_document::LengthUnit::Mm).flush_offset();
+        for centre in [[0.0, 0.0], [1.0e4, -3.0e4]] {
+            let region = star(centre, 40);
+            let index = SideIndex::new(&region, flush);
+            let mut checked = 0;
+            for (a, b) in segments(&region) {
+                let n = outward(a, b);
+                // The face as built, moved by a flush offset, moved far out,
+                // and tilted by just under and over the matching angle.
+                for (shift, tilt) in [
+                    (0.0f64, 0.0f64),
+                    (flush, 0.0),
+                    (-flush, 4e-5),
+                    (50.0, 0.0),
+                    (0.0, 5e-5),
+                ] {
+                    let n = [
+                        n[0] * tilt.cos() - n[1] * tilt.sin(),
+                        n[0] * tilt.sin() + n[1] * tilt.cos(),
+                    ];
+                    let face: Vec<Point2> = [a, b]
+                        .iter()
+                        .map(|p| [p[0] + n[0] * shift, p[1] + n[1] * shift])
+                        .collect();
+                    assert_eq!(index.find(n, &face), scan(&region, n, &face));
+                    checked += 1;
+                }
+            }
+            assert!(checked > 500);
+        }
+    }
+
+    #[test]
+    fn sketch_index_matches_a_full_scan() {
+        let region = star([3.0, -7.0], 30);
+        let profiles: Vec<Profile> = std::iter::once(&region.outer)
+            .chain(&region.holes)
+            .map(|points| Profile {
+                points: points.clone(),
+            })
+            .collect();
+        let index = SketchIndex::new(&profiles, 1e-6);
+        for (a, b) in segments(&region) {
+            let jitter = [a[0] + 5e-7, a[1] - 0.0];
+            for (p, q) in [(a, b), (b, a), (jitter, b), ([a[0] + 1.0, a[1]], b)] {
+                assert_eq!(index.find(p, q), sketch_edge(&profiles, p, q, 1e-6));
+            }
+        }
+        // Negative zero matches positive zero exactly.
+        let zero = vec![Profile {
+            points: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
+        }];
+        let index = SketchIndex::new(&zero, 0.0);
+        assert!(index.exact.contains_key(&bits([-0.0, -0.0], [1.0, 0.0])));
+    }
 
     /// Rectangle x in [5, 8], height in [0, 4] on the XZ plane, which holds
     /// the Z axis it is revolved about.
@@ -498,7 +737,15 @@ mod tests {
         // after a guessed loop, so caps (and sides) are unknown and unique.
         let (_, region, frame, face) = setup();
         let solid = builder::tsweep(&face, frame.normal * 2.0);
-        let origins = extrude_tool(FeatureId(1), &[], &region, &frame, false, &solid, 1e-6);
+        let origins = extrude_tool(
+            FeatureId(1),
+            &[],
+            &region,
+            &frame,
+            false,
+            &solid,
+            Tolerance::for_units(sm_document::LengthUnit::Mm),
+        );
         let all = roles(&origins, &solid);
         assert!(
             all.iter().all(|r| matches!(r, FaceRole::Unknown { .. })),

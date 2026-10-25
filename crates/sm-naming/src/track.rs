@@ -69,7 +69,7 @@ impl RebuildObserver for Tracker<'_> {
             tool.frame,
             reversed,
             tool.solid,
-            tool.tol.linear,
+            tool.tol,
         );
         self.tools.extend(&origins);
     }
