@@ -9,7 +9,7 @@ fn close(a: [f64; 2], b: [f64; 2]) -> bool {
 
 /// A roughly drawn quadrilateral: four points and four lines in a loop.
 fn quad(s: &mut Sketch, pts: [[f64; 2]; 4]) -> ([PointId; 4], [CurveId; 4]) {
-    let p = pts.map(|[x, y]| s.add_point(x, y));
+    let p = pts.map(|[x, y]| s.add_point(x, y).unwrap());
     let l = [0, 1, 2, 3].map(|i| s.add_line(p[i], p[(i + 1) % 4]).unwrap());
     (p, l)
 }
@@ -52,20 +52,20 @@ fn rectangle_becomes_fully_constrained() {
 fn degrees_of_freedom_per_entity() {
     let mut s = Sketch::new();
     assert_eq!(s.analyse().dof, 0, "the origin is grounded");
-    let a = s.add_point(1.0, 1.0);
-    let b = s.add_point(5.0, 2.0);
+    let a = s.add_point(1.0, 1.0).unwrap();
+    let b = s.add_point(5.0, 2.0).unwrap();
     let line = s.add_line(a, b).unwrap();
     assert_eq!(s.analyse().dof, 4);
     s.add_constraint(Constraint::Horizontal(line)).unwrap();
     assert_eq!(s.analyse().dof, 3);
 
-    let c = s.add_point(20.0, 0.0);
+    let c = s.add_point(20.0, 0.0).unwrap();
     s.add_circle(c, 3.0).unwrap();
     assert_eq!(s.analyse().dof, 3 + 3);
 
-    let ac = s.add_point(0.0, 30.0);
-    let a0 = s.add_point(5.0, 30.0);
-    let a1 = s.add_point(0.0, 34.0);
+    let ac = s.add_point(0.0, 30.0).unwrap();
+    let a0 = s.add_point(5.0, 30.0).unwrap();
+    let a1 = s.add_point(0.0, 34.0).unwrap();
     let arc = s.add_arc(ac, a0, a1).unwrap();
     assert_eq!(s.analyse().dof, 3 + 3 + 5);
     let Curve::Arc { radius, .. } = s.curve(arc).unwrap() else {
@@ -122,22 +122,22 @@ fn redundant_geometric_constraint_is_refused() {
     // Not even on an under-constrained sketch: two horizontals are parallel.
     let mut s = Sketch::new();
     let (_, l) = quad(&mut s, [[0.0, 0.0], [10.0, 1.0], [9.0, 8.0], [1.0, 7.0]]);
-    s.add_constraint(Constraint::Horizontal(l[0])).unwrap();
-    s.add_constraint(Constraint::Horizontal(l[2])).unwrap();
+    let h0 = s.add_constraint(Constraint::Horizontal(l[0])).unwrap();
+    let h2 = s.add_constraint(Constraint::Horizontal(l[2])).unwrap();
     let Err(SketchError::OverConstrained { conflicts_with }) =
         s.add_constraint(Constraint::Parallel(l[0], l[2]))
     else {
         panic!()
     };
-    assert_eq!(conflicts_with, vec![ConstraintId(0), ConstraintId(1)]);
+    assert_eq!(conflicts_with, vec![h0, h2]);
 }
 
 #[test]
 fn impossible_dimension_is_refused() {
     let mut s = Sketch::new();
-    let a = s.add_point(0.0, 0.0);
-    let b = s.add_point(10.0, 0.0);
-    let c = s.add_point(5.0, 8.0);
+    let a = s.add_point(0.0, 0.0).unwrap();
+    let b = s.add_point(10.0, 0.0).unwrap();
+    let c = s.add_point(5.0, 8.0).unwrap();
     s.add_constraint(Constraint::Distance(a, b, 10.0)).unwrap();
     s.add_constraint(Constraint::Distance(b, c, 10.0)).unwrap();
     let before = s.point(c).unwrap();
@@ -152,10 +152,10 @@ fn impossible_dimension_is_refused() {
 #[test]
 fn solving_moves_geometry_as_little_as_possible() {
     let mut s = Sketch::new();
-    let a = s.add_point(0.0, 0.0);
-    let b = s.add_point(10.0, 1.0);
+    let a = s.add_point(0.0, 0.0).unwrap();
+    let b = s.add_point(10.0, 1.0).unwrap();
     let line = s.add_line(a, b).unwrap();
-    let lonely = s.add_point(3.0, 7.0);
+    let lonely = s.add_point(3.0, 7.0).unwrap();
     s.add_constraint(Constraint::Horizontal(line)).unwrap();
     // Minimum-norm: both endpoints meet halfway.
     assert!(close(s.point(a).unwrap(), [0.0, 0.5]));
@@ -166,11 +166,11 @@ fn solving_moves_geometry_as_little_as_possible() {
 #[test]
 fn tangency_keeps_the_drawn_side() {
     let mut s = Sketch::new();
-    let a = s.add_point(-10.0, 0.0);
-    let b = s.add_point(10.0, 0.0);
+    let a = s.add_point(-10.0, 0.0).unwrap();
+    let b = s.add_point(10.0, 0.0).unwrap();
     let line = s.add_line(a, b).unwrap();
     s.add_constraint(Constraint::Horizontal(line)).unwrap();
-    let c = s.add_point(0.0, -4.0);
+    let c = s.add_point(0.0, -4.0).unwrap();
     let circle = s.add_circle(c, 3.0).unwrap();
     s.add_constraint(Constraint::Tangent(line, circle)).unwrap();
     let center = s.point(c).unwrap();
@@ -182,7 +182,7 @@ fn tangency_keeps_the_drawn_side() {
     assert!((y_line - center[1] - radius).abs() < EPS);
 
     // Two circles drawn overlapping a little become externally tangent.
-    let d = s.add_point(6.0, -4.0);
+    let d = s.add_point(6.0, -4.0).unwrap();
     let other = s.add_circle(d, 3.5).unwrap();
     s.add_constraint(Constraint::Tangent(circle, other))
         .unwrap();
@@ -199,9 +199,9 @@ fn tangency_keeps_the_drawn_side() {
 #[test]
 fn internal_tangency_and_concentric() {
     let mut s = Sketch::new();
-    let c = s.add_point(0.0, 0.0);
+    let c = s.add_point(0.0, 0.0).unwrap();
     let big = s.add_circle(c, 10.0).unwrap();
-    let d = s.add_point(5.0, 0.0);
+    let d = s.add_point(5.0, 0.0).unwrap();
     let small = s.add_circle(d, 4.0).unwrap();
     s.add_constraint(Constraint::Tangent(big, small)).unwrap();
     let dist = s.point(d).unwrap()[0] - s.point(c).unwrap()[0];
@@ -213,7 +213,7 @@ fn internal_tangency_and_concentric() {
     };
     assert!((dist.abs() - (r1 - r2)).abs() < EPS);
 
-    let e = s.add_point(30.0, 1.0);
+    let e = s.add_point(30.0, 1.0).unwrap();
     let ring = s.add_circle(e, 2.0).unwrap();
     s.add_constraint(Constraint::Concentric(big, ring)).unwrap();
     assert!(close(s.point(e).unwrap(), s.point(c).unwrap()));
@@ -222,9 +222,9 @@ fn internal_tangency_and_concentric() {
 #[test]
 fn arcs_dimensions_and_equal() {
     let mut s = Sketch::new();
-    let c = s.add_point(0.0, 0.0);
-    let p0 = s.add_point(5.0, 0.0);
-    let p1 = s.add_point(0.0, 5.0);
+    let c = s.add_point(0.0, 0.0).unwrap();
+    let p0 = s.add_point(5.0, 0.0).unwrap();
+    let p1 = s.add_point(0.0, 5.0).unwrap();
     let arc = s.add_arc(c, p0, p1).unwrap();
     s.add_constraint(Constraint::Coincident(c, s.origin()))
         .unwrap();
@@ -233,7 +233,7 @@ fn arcs_dimensions_and_equal() {
         let [x, y] = s.point(p).unwrap();
         assert!((x.hypot(y) - 8.0).abs() < EPS);
     }
-    let q = s.add_point(20.0, 0.0);
+    let q = s.add_point(20.0, 0.0).unwrap();
     let circle = s.add_circle(q, 2.0).unwrap();
     s.add_constraint(Constraint::Equal(arc, circle)).unwrap();
     let Curve::Circle { radius, .. } = s.curve(circle).unwrap() else {
@@ -254,10 +254,10 @@ fn arcs_dimensions_and_equal() {
 fn angle_parallel_perpendicular() {
     let mut s = Sketch::new();
     let o = s.origin();
-    let a = s.add_point(10.0, 0.5);
+    let a = s.add_point(10.0, 0.5).unwrap();
     let base = s.add_line(o, a).unwrap();
     s.add_constraint(Constraint::Horizontal(base)).unwrap();
-    let b = s.add_point(8.0, 5.0);
+    let b = s.add_point(8.0, 5.0).unwrap();
     let arm = s.add_line(o, b).unwrap();
     let ang = s
         .add_constraint(Constraint::Angle(base, arm, 30f64.to_radians()))
@@ -268,13 +268,13 @@ fn angle_parallel_perpendicular() {
     let [x, y] = s.point(b).unwrap();
     assert!((y.atan2(x) - 2.0 * PI / 3.0).abs() < 1e-9);
 
-    let c = s.add_point(0.0, 10.0);
-    let d = s.add_point(9.0, 11.0);
+    let c = s.add_point(0.0, 10.0).unwrap();
+    let d = s.add_point(9.0, 11.0).unwrap();
     let top = s.add_line(c, d).unwrap();
     s.add_constraint(Constraint::Parallel(base, top)).unwrap();
     assert!((s.point(c).unwrap()[1] - s.point(d).unwrap()[1]).abs() < EPS);
-    let e = s.add_point(20.0, 0.0);
-    let f = s.add_point(21.0, 9.0);
+    let e = s.add_point(20.0, 0.0).unwrap();
+    let f = s.add_point(21.0, 9.0).unwrap();
     let side = s.add_line(e, f).unwrap();
     s.add_constraint(Constraint::Perpendicular(top, side))
         .unwrap();
@@ -284,35 +284,35 @@ fn angle_parallel_perpendicular() {
 #[test]
 fn midpoint_symmetric_collinear_point_on_curve() {
     let mut s = Sketch::new();
-    let a = s.add_point(0.0, 0.0);
-    let b = s.add_point(0.0, 10.0);
+    let a = s.add_point(0.0, 0.0).unwrap();
+    let b = s.add_point(0.0, 10.0).unwrap();
     let axis = s.add_line(a, b).unwrap();
     s.add_constraint(Constraint::Vertical(axis)).unwrap();
-    let m = s.add_point(1.0, 4.0);
+    let m = s.add_point(1.0, 4.0).unwrap();
     s.add_constraint(Constraint::Midpoint(m, axis)).unwrap();
     let mid = s.point(m).unwrap();
     let (pa, pb) = (s.point(a).unwrap(), s.point(b).unwrap());
     assert!(close(mid, [(pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0]));
 
-    let p = s.add_point(-3.0, 2.0);
-    let q = s.add_point(4.0, 2.5);
+    let p = s.add_point(-3.0, 2.0).unwrap();
+    let q = s.add_point(4.0, 2.5).unwrap();
     s.add_constraint(Constraint::Symmetric(p, q, axis)).unwrap();
     let (pp, qq) = (s.point(p).unwrap(), s.point(q).unwrap());
     let x_axis = s.point(a).unwrap()[0];
     assert!((pp[1] - qq[1]).abs() < EPS);
     assert!(((pp[0] + qq[0]) / 2.0 - x_axis).abs() < EPS);
 
-    let c = s.add_point(5.0, 0.0);
-    let d = s.add_point(5.5, 3.0);
+    let c = s.add_point(5.0, 0.0).unwrap();
+    let d = s.add_point(5.5, 3.0).unwrap();
     let other = s.add_line(c, d).unwrap();
     s.add_constraint(Constraint::Collinear(axis, other))
         .unwrap();
     assert!((s.point(c).unwrap()[0] - s.point(a).unwrap()[0]).abs() < EPS);
     assert!((s.point(d).unwrap()[0] - s.point(a).unwrap()[0]).abs() < EPS);
 
-    let center = s.add_point(30.0, 0.0);
+    let center = s.add_point(30.0, 0.0).unwrap();
     let circle = s.add_circle(center, 5.0).unwrap();
-    let r = s.add_point(36.0, 1.0);
+    let r = s.add_point(36.0, 1.0).unwrap();
     s.add_constraint(Constraint::PointOnCurve(r, circle))
         .unwrap();
     let [x, y] = s.point(r).unwrap();
@@ -326,12 +326,12 @@ fn midpoint_symmetric_collinear_point_on_curve() {
 #[test]
 fn fix_and_point_line_distance() {
     let mut s = Sketch::new();
-    let a = s.add_point(0.0, 0.0);
-    let b = s.add_point(10.0, 0.0);
+    let a = s.add_point(0.0, 0.0).unwrap();
+    let b = s.add_point(10.0, 0.0).unwrap();
     let line = s.add_line(a, b).unwrap();
     s.add_constraint(Constraint::Fix(Entity::Curve(line)))
         .unwrap();
-    let p = s.add_point(4.0, 3.0);
+    let p = s.add_point(4.0, 3.0).unwrap();
     s.add_constraint(Constraint::PointLineDistance(p, line, 7.0))
         .unwrap();
     assert!((s.point(p).unwrap()[1] - 7.0).abs() < EPS);
@@ -349,8 +349,8 @@ fn fix_and_point_line_distance() {
 #[test]
 fn dragging_follows_constraints() {
     let mut s = Sketch::new();
-    let a = s.add_point(0.0, 0.0);
-    let b = s.add_point(10.0, 0.0);
+    let a = s.add_point(0.0, 0.0).unwrap();
+    let b = s.add_point(10.0, 0.0).unwrap();
     let line = s.add_line(a, b).unwrap();
     s.add_constraint(Constraint::Horizontal(line)).unwrap();
     s.add_constraint(Constraint::Distance(a, b, 10.0)).unwrap();
@@ -374,8 +374,8 @@ fn dragging_follows_constraints() {
 #[test]
 fn unchecked_conflicts_are_reported() {
     let mut s = Sketch::new();
-    let a = s.add_point(0.0, 0.0);
-    let b = s.add_point(10.0, 0.0);
+    let a = s.add_point(0.0, 0.0).unwrap();
+    let b = s.add_point(10.0, 0.0).unwrap();
     let first = s
         .add_constraint(Constraint::HorizontalDistance(a, b, 10.0))
         .unwrap();
@@ -399,8 +399,8 @@ fn unchecked_conflicts_are_reported() {
 #[test]
 fn rejects_bad_input() {
     let mut s = Sketch::new();
-    let a = s.add_point(0.0, 0.0);
-    let b = s.add_point(1.0, 0.0);
+    let a = s.add_point(0.0, 0.0).unwrap();
+    let b = s.add_point(1.0, 0.0).unwrap();
     let line = s.add_line(a, b).unwrap();
     let c = s.add_circle(a, 1.0).unwrap();
     assert!(matches!(
@@ -428,8 +428,10 @@ fn rejects_bad_input() {
         Err(SketchError::WrongGeometry(_))
     ));
     assert_eq!(
-        s.add_line(a, PointId(99)),
-        Err(SketchError::UnknownPoint(PointId(99)))
+        s.add_line(a, PointId(uuid::Uuid::from_u128(99))),
+        Err(SketchError::UnknownPoint(PointId(uuid::Uuid::from_u128(
+            99
+        ))))
     );
     assert!(matches!(
         s.add_driven_dimension(Constraint::Horizontal(line)),
@@ -480,17 +482,17 @@ fn large_sketch_solves() {
 fn parallel_from_far_off_and_either_direction() {
     let mut s = Sketch::new();
     let o = s.origin();
-    let a = s.add_point(10.0, 0.0);
+    let a = s.add_point(10.0, 0.0).unwrap();
     let base = s.add_line(o, a).unwrap();
     s.add_constraint(Constraint::Horizontal(base)).unwrap();
     // Drawn 80° off and pointing back the other way.
-    let c = s.add_point(5.0, 10.0);
-    let d = s.add_point(3.0, 0.0);
+    let c = s.add_point(5.0, 10.0).unwrap();
+    let d = s.add_point(3.0, 0.0).unwrap();
     let steep = s.add_line(c, d).unwrap();
     s.add_constraint(Constraint::Parallel(base, steep)).unwrap();
     assert!((s.point(c).unwrap()[1] - s.point(d).unwrap()[1]).abs() < EPS);
-    let e = s.add_point(20.0, 0.0);
-    let f = s.add_point(12.0, 1.0);
+    let e = s.add_point(20.0, 0.0).unwrap();
+    let f = s.add_point(12.0, 1.0).unwrap();
     let back = s.add_line(e, f).unwrap();
     s.add_constraint(Constraint::Parallel(base, back)).unwrap();
     let (pe, pf) = (s.point(e).unwrap(), s.point(f).unwrap());
@@ -502,10 +504,10 @@ fn parallel_from_far_off_and_either_direction() {
 fn corrupt_files_are_rejected() {
     use serde_json::{json, Value};
     let mut s = Sketch::new();
-    let a = s.add_point(0.0, 0.0);
-    let b = s.add_point(10.0, 0.0);
+    let a = s.add_point(0.0, 0.0).unwrap();
+    let b = s.add_point(10.0, 0.0).unwrap();
     let line = s.add_line(a, b).unwrap();
-    let c = s.add_point(0.0, 20.0);
+    let c = s.add_point(0.0, 20.0).unwrap();
     s.add_circle(c, 3.0).unwrap();
     s.add_constraint(Constraint::Fix(Entity::Curve(line)))
         .unwrap();
@@ -515,42 +517,48 @@ fn corrupt_files_are_rejected() {
     assert!(serde_json::from_value::<Sketch>(good.clone()).is_ok());
 
     type Tamper = Box<dyn Fn(&mut Value)>;
+    fn other() -> Value {
+        json!("0190a000-0000-7000-8000-000000000001")
+    }
     let tamper: Vec<(&str, Tamper)> = vec![
         (
-            "dropped variable",
-            Box::new(|v| drop(v["vars"].as_array_mut().unwrap().pop())),
+            "duplicate point",
+            Box::new(|v| v["points"][1]["id"] = v["points"][0]["id"].clone()),
         ),
         (
-            "point past the end",
-            Box::new(|v| v["points"][1]["var"] = json!(1_000_000)),
+            "point named like the origin",
+            Box::new(|v| v["points"][0]["id"] = json!(uuid::Uuid::nil())),
         ),
         (
-            "point sharing variables",
-            Box::new(|v| v["points"][2]["var"] = json!(2)),
+            "duplicate curve",
+            Box::new(|v| v["curves"][1]["id"] = v["curves"][0]["id"].clone()),
         ),
         (
-            "usize overflow",
-            Box::new(|v| v["points"][1]["var"] = json!(u64::MAX)),
+            "duplicate constraint",
+            Box::new(|v| v["constraints"][1]["id"] = v["constraints"][0]["id"].clone()),
         ),
         (
             "line to missing point",
-            Box::new(|v| v["curves"][0]["geom"]["line"]["end"] = json!(42)),
+            Box::new(|v| v["curves"][0]["geom"]["line"]["end"] = other()),
         ),
         (
             "line to itself",
-            Box::new(|v| v["curves"][0]["geom"]["line"]["end"] = json!(1)),
+            Box::new(|v| v["curves"][0]["geom"]["line"]["end"] = v["points"][0]["id"].clone()),
         ),
         (
-            "ungrounded origin",
-            Box::new(|v| v["grounded"][0] = json!(false)),
-        ),
-        (
-            "grounded other point",
-            Box::new(|v| v["grounded"][2] = json!(true)),
+            "circle on missing center",
+            Box::new(|v| v["curves"][1]["geom"]["circle"]["center"] = other()),
         ),
         (
             "constraint on missing curve",
-            Box::new(|v| v["constraints"][0]["constraint"]["fix"]["curve"] = json!(9)),
+            Box::new(|v| v["constraints"][0]["constraint"]["fix"]["curve"] = other()),
+        ),
+        (
+            "constraint on the wrong kind of curve",
+            Box::new(|v| {
+                v["constraints"][0]["constraint"] =
+                    json!({"horizontal": v["curves"][1]["id"].clone()})
+            }),
         ),
         (
             "short fix data",
@@ -572,6 +580,12 @@ fn corrupt_files_are_rejected() {
             Box::new(|v| v["constraints"][1]["captured"] = json!({"sign": 0.5})),
         ),
         (
+            "wrong orientation kind",
+            Box::new(|v| {
+                v["constraints"][1]["captured"] = json!({"tangency": {"s1": 1.0, "s2": 1.0}})
+            }),
+        ),
+        (
             "driven non-dimension",
             Box::new(|v| v["constraints"][0]["driving"] = json!(false)),
         ),
@@ -589,20 +603,23 @@ fn corrupt_files_are_rejected() {
 #[test]
 fn degenerate_geometry_never_reads_as_solved() {
     let mut s = Sketch::new();
-    let a = s.add_point(0.0, 0.0);
-    let b = s.add_point(10.0, 0.0);
+    let a = s.add_point(0.0, 0.0).unwrap();
+    let b = s.add_point(10.0, 0.0).unwrap();
     let line = s.add_line(a, b).unwrap();
     assert!(matches!(
         s.add_constraint(Constraint::Coincident(a, b)),
         Err(SketchError::WrongGeometry(_))
     ));
     // Collapse the line through a third point, which can't be caught up front.
-    let m = s.add_point(5.0, 0.0);
+    let m = s.add_point(5.0, 0.0).unwrap();
     s.add_constraint(Constraint::Coincident(a, m)).unwrap();
     s.add_constraint(Constraint::Coincident(m, b)).unwrap();
-    let p = s.add_point(3.0, 4.0);
+    let p = s.add_point(3.0, 4.0).unwrap();
     let before: Vec<_> = s.points().map(|q| s.point(q).unwrap()).collect();
-    assert!(s.add_constraint(Constraint::PointOnCurve(p, line)).is_err());
+    assert_eq!(
+        s.add_constraint(Constraint::PointOnCurve(p, line)),
+        Err(SketchError::DegenerateGeometry)
+    );
     let after: Vec<_> = s.points().map(|q| s.point(q).unwrap()).collect();
     assert_eq!(before, after);
     assert!(after.iter().flatten().all(|v| v.is_finite()));
@@ -612,8 +629,8 @@ fn degenerate_geometry_never_reads_as_solved() {
 #[test]
 fn driven_dimensions_accept_any_placeholder_and_reload_at_zero() {
     let mut s = Sketch::new();
-    let a = s.add_point(0.0, 0.0);
-    let b = s.add_point(5.0, 0.0);
+    let a = s.add_point(0.0, 0.0).unwrap();
+    let b = s.add_point(5.0, 0.0).unwrap();
     let d = s
         .add_driven_dimension(Constraint::Distance(a, b, f64::NAN))
         .unwrap();
@@ -623,4 +640,240 @@ fn driven_dimensions_accept_any_placeholder_and_reload_at_zero() {
     let json = serde_json::to_string(&s).unwrap();
     let back: Sketch = serde_json::from_str(&json).unwrap();
     assert!(back.dimension_value(d).unwrap().abs() < EPS);
+}
+
+#[test]
+fn distance_between_coincident_points_pulls_them_apart() {
+    let mut s = Sketch::new();
+    let a = s.add_point(3.0, 4.0).unwrap();
+    let b = s.add_point(3.0, 4.0).unwrap();
+    s.add_constraint(Constraint::Distance(a, b, 5.0)).unwrap();
+    let (pa, pb) = (s.point(a).unwrap(), s.point(b).unwrap());
+    assert!(((pb[0] - pa[0]).hypot(pb[1] - pa[1]) - 5.0).abs() < EPS);
+    // Also when one of them is the origin, which can't move.
+    let c = s.add_point(0.0, 0.0).unwrap();
+    s.add_constraint(Constraint::Distance(s.origin(), c, 2.0))
+        .unwrap();
+    assert_eq!(s.point(s.origin()).unwrap(), [0.0, 0.0]);
+    assert!((s.point(c).unwrap()[0].hypot(s.point(c).unwrap()[1]) - 2.0).abs() < EPS);
+}
+
+#[test]
+fn angle_on_zero_length_line_is_degenerate() {
+    let mut s = Sketch::new();
+    let a = s.add_point(1.0, 1.0).unwrap();
+    let b = s.add_point(4.0, 1.0).unwrap();
+    let base = s.add_line(a, b).unwrap();
+    let c = s.add_point(2.0, 2.0).unwrap();
+    let d = s.add_point(2.0, 2.0).unwrap();
+    let stub = s.add_line(c, d).unwrap();
+    let before: Vec<_> = s.points().map(|q| s.point(q).unwrap()).collect();
+    for c in [
+        Constraint::Angle(base, stub, 0.5),
+        Constraint::Parallel(base, stub),
+        Constraint::Equal(base, stub),
+    ] {
+        assert_eq!(
+            s.add_constraint(c),
+            Err(SketchError::DegenerateGeometry),
+            "{c:?}"
+        );
+    }
+    let after: Vec<_> = s.points().map(|q| s.point(q).unwrap()).collect();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn arc_ending_on_the_origin_is_consistent() {
+    let mut s = Sketch::new();
+    let c = s.add_point(5.0, 0.0).unwrap();
+    let start = s.add_point(5.0, 3.0).unwrap();
+    let arc = s.add_arc(c, start, s.origin()).unwrap();
+    let Curve::Arc { radius, .. } = s.curve(arc).unwrap() else {
+        panic!()
+    };
+    assert!((radius - 5.0).abs() < EPS, "radius from the grounded end");
+    assert!(
+        close(s.point(start).unwrap(), [5.0, 5.0]),
+        "start moved onto the circle"
+    );
+    assert!(s.analyse().unsatisfied.is_empty());
+    let report = s.solve();
+    assert!(report.converged && report.iterations == 0);
+}
+
+#[test]
+fn large_coordinates_solve() {
+    let mut s = Sketch::new();
+    let off = 1e7;
+    let (p, l) = quad(
+        &mut s,
+        [
+            [off, off],
+            [off + 41.0, off + 1.0],
+            [off + 39.0, off + 22.0],
+            [off - 1.0, off + 19.0],
+        ],
+    );
+    for c in [
+        Constraint::Horizontal(l[0]),
+        Constraint::Horizontal(l[2]),
+        Constraint::Vertical(l[1]),
+        Constraint::Vertical(l[3]),
+        Constraint::Distance(p[0], p[1], 40.0),
+        Constraint::Distance(p[1], p[2], 20.0),
+    ] {
+        s.add_constraint(c).unwrap();
+    }
+    let (a, b) = (s.point(p[0]).unwrap(), s.point(p[2]).unwrap());
+    assert!((b[0] - a[0] - 40.0).abs() < 1e-6 && (b[1] - a[1] - 20.0).abs() < 1e-6);
+    assert_eq!(s.analyse().dof, 2);
+}
+
+#[test]
+fn unsatisfied_lists_each_constraint_once() {
+    let mut s = Sketch::new();
+    let a = s.add_point(0.0, 0.0).unwrap();
+    let b = s.add_point(1.0, 1.0).unwrap();
+    let fix = s.add_constraint(Constraint::Fix(Entity::Point(b))).unwrap();
+    let both = s
+        .add_constraint_unchecked(Constraint::Coincident(a, b))
+        .unwrap();
+    let other = s
+        .add_constraint_unchecked(Constraint::Fix(Entity::Point(a)))
+        .unwrap();
+    let analysis = s.analyse();
+    // Both of the coincident's equations fail, but it's listed once. Fix
+    // pins where the point is, so it holds.
+    assert_eq!(analysis.unsatisfied, vec![both]);
+    assert!(!analysis.unsatisfied.contains(&fix) && !analysis.unsatisfied.contains(&other));
+}
+
+#[test]
+fn deleting_geometry_takes_its_points_and_constraints() {
+    let mut s = Sketch::new();
+    let (p, l, [w, h]) = rectangle(&mut s);
+    let ids_before: Vec<CurveId> = s.curves().collect();
+    // Deleting the top line removes nothing else: its points are shared.
+    let removed = s.remove_curve(l[2]).unwrap();
+    assert_eq!(removed.curves, vec![l[2]]);
+    assert!(removed.points.is_empty());
+    assert_eq!(removed.constraints.len(), 1, "its horizontal constraint");
+    assert_eq!(s.analyse().dof, 1, "the top edge may now tilt");
+    // The other curves keep their ids.
+    let kept: Vec<CurveId> = ids_before.into_iter().filter(|&c| c != l[2]).collect();
+    assert_eq!(s.curves().collect::<Vec<_>>(), kept);
+
+    // Deleting a corner takes both lines on it, and the dimension on it.
+    let removed = s.remove_point(p[1]).unwrap();
+    let mut corner_points = vec![p[1], p[2]];
+    corner_points.sort();
+    assert_eq!(
+        removed.points, corner_points,
+        "p2 was only on the deleted lines"
+    );
+    let mut lines = vec![l[0], l[1]];
+    lines.sort();
+    assert_eq!(removed.curves, lines);
+    assert!(removed.constraints.contains(&w) && removed.constraints.contains(&h));
+    assert!(s.point(p[1]).is_err());
+    // The remaining left edge still solves and analyses after the rebuild.
+    assert!(s.solve().converged);
+    let a = s.analyse();
+    assert_eq!(a.status, ConstraintStatus::UnderConstrained);
+    assert_eq!(a.dof, 1, "only the left edge's length is free");
+    assert_eq!(
+        s.remove_point(s.origin()),
+        Err(SketchError::WrongGeometry("the origin can't be deleted"))
+    );
+
+    // A curve's own points go with it when nothing else uses them.
+    let c = s.add_point(50.0, 50.0).unwrap();
+    let circle = s.add_circle(c, 2.0).unwrap();
+    s.add_constraint(Constraint::Radius(circle, 3.0)).unwrap();
+    let removed = s.remove_curve(circle).unwrap();
+    assert_eq!(removed.points, vec![c]);
+    assert_eq!(removed.constraints.len(), 1);
+    let json = serde_json::to_string(&s).unwrap();
+    assert!(serde_json::from_str::<Sketch>(&json).is_ok());
+}
+
+#[test]
+fn ids_are_unique_and_time_ordered() {
+    let mut s = Sketch::new();
+    let a = s.add_point(0.0, 0.0).unwrap();
+    let b = s.add_point(1.0, 0.0).unwrap();
+    assert!(a < b);
+    let mut other = Sketch::new();
+    let c = other.add_point(0.0, 0.0).unwrap();
+    assert!(a != c && b != c, "ids don't repeat across sketches");
+    assert_eq!(s.origin(), other.origin());
+}
+
+#[test]
+fn oversized_sketches_are_refused() {
+    use serde_json::json;
+    // Too many records in a file.
+    let points: Vec<_> = (0..MAX_POINTS)
+        .map(|i| json!({"id": uuid::Uuid::from_u128(i as u128 + 1), "x": 0.0, "y": 0.0}))
+        .collect();
+    let file = json!({"points": points});
+    let err = serde_json::from_value::<Sketch>(file)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("too large"), "{err}");
+
+    // One point every constraint touches: the coupled cluster is dense, so
+    // solving and analysing it are refused instead of grinding.
+    let mut s = Sketch::new();
+    let hub = s.add_point(0.0, 0.0).unwrap();
+    for i in 0..1000 {
+        let a = s.add_point(i as f64, 1.0).unwrap();
+        let b = s.add_point(i as f64, 2.0).unwrap();
+        let line = s.add_line(a, b).unwrap();
+        s.add_constraint_unchecked(Constraint::PointOnCurve(hub, line))
+            .unwrap();
+    }
+    let report = s.solve();
+    assert!(report.too_large && !report.converged);
+    let analysis = s.analyse();
+    assert!(analysis.too_large);
+    assert_ne!(analysis.status, ConstraintStatus::FullyConstrained);
+}
+
+#[test]
+fn long_chain_builds_and_drags() {
+    // An open chain of lines, each horizontal or vertical with a length,
+    // placed one constraint at a time as a user would.
+    let mut s = Sketch::new();
+    let mut prev = s.origin();
+    let mut last = prev;
+    for i in 0..150 {
+        let [x, y] = s.point(prev).unwrap();
+        let next = if i % 2 == 0 {
+            s.add_point(x + 9.0, y + 0.5).unwrap()
+        } else {
+            s.add_point(x + 0.5, y + 9.0).unwrap()
+        };
+        let line = s.add_line(prev, next).unwrap();
+        let dir = if i % 2 == 0 {
+            Constraint::Horizontal(line)
+        } else {
+            Constraint::Vertical(line)
+        };
+        s.add_constraint(dir).unwrap();
+        s.add_constraint(Constraint::Distance(prev, next, 10.0))
+            .unwrap();
+        prev = next;
+        last = next;
+    }
+    assert_eq!(s.analyse().dof, 0);
+    let target = s.point(last).unwrap();
+    let report = s.drag_point(last, [target[0] + 5.0, target[1]]).unwrap();
+    assert!(report.converged);
+    let got = s.point(last).unwrap();
+    assert!(
+        close(got, target),
+        "snaps back: {got:?} vs {target:?} {report:?}"
+    );
 }

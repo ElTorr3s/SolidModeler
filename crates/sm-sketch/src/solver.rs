@@ -3,6 +3,7 @@
 //! for degrees of freedom and redundant equations.
 
 use crate::equations::Equation;
+use crate::sparse::Skyline;
 
 /// Equations that share variables, and the unknowns they read. Clusters are
 /// solved and analysed on their own, which keeps the dense linear algebra
@@ -90,7 +91,7 @@ fn clear_columns(col: &mut [usize], cluster: &Cluster) {
 
 pub(crate) struct SolveSettings {
     /// A cluster is solved when every residual is at most this, in model
-    /// units (or radians-ish for angle equations).
+    /// units (or radians for angle equations).
     pub tolerance: f64,
     pub max_iterations: usize,
 }
@@ -104,11 +105,93 @@ impl Default for SolveSettings {
     }
 }
 
+/// Most factorization work (see [`Skyline::work`]) one cluster may need per
+/// step, about a tenth of a second. Sketches past it are refused rather than
+/// freezing the program: ordinary profiles are far below it.
+pub(crate) const MAX_FACTOR_WORK: f64 = 2e8;
+
+/// Most work [`analyse_cluster`]'s dense Gram–Schmidt may do on one cluster.
+pub(crate) const MAX_ANALYSIS_WORK: f64 = 2e9;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ClusterOutcome {
     pub converged: bool,
     pub iterations: usize,
     pub max_residual: f64,
+    /// The cluster was over the work budget and left unsolved.
+    pub too_large: bool,
+}
+
+/// Sparse Jacobian rows of a cluster as `(column, ∂)` pairs sorted by
+/// column. Every unknown an equation reads gets an entry, even when its
+/// derivative is zero, so the pattern only depends on the equations.
+fn sparse_rows(
+    x: &[f64],
+    eqs: &[Equation],
+    cluster: &Cluster,
+    col: &[usize],
+) -> Vec<Vec<(usize, f64)>> {
+    cluster
+        .eqs
+        .iter()
+        .map(|&e| {
+            let mut row: Vec<(usize, f64)> = Vec::new();
+            eqs[e].gradient(x, |v| col[v] != usize::MAX, |v, d| row.push((col[v], d)));
+            row.sort_by_key(|&(c, _)| c);
+            row.dedup_by(|later, kept| {
+                let same = later.0 == kept.0;
+                if same {
+                    kept.1 += later.1;
+                }
+                same
+            });
+            row
+        })
+        .collect()
+}
+
+/// For each column, the `(row, ∂)` entries of `rows` (indexed by position in
+/// `rows`) that touch it.
+fn columns_of(rows: &[&Vec<(usize, f64)>], n: usize) -> Vec<Vec<(usize, f64)>> {
+    let mut cols = vec![Vec::new(); n];
+    for (r, row) in rows.iter().enumerate() {
+        for &(c, d) in row.iter() {
+            cols[c].push((r, d));
+        }
+    }
+    cols
+}
+
+/// Which rows share a column, the sparsity pattern of `J Jᵀ`.
+fn row_adjacency(cols: &[Vec<(usize, f64)>], m: usize) -> Vec<Vec<usize>> {
+    let mut adj = vec![Vec::new(); m];
+    for entries in cols {
+        for (a, &(r, _)) in entries.iter().enumerate() {
+            for &(q, _) in &entries[..a] {
+                if q != r {
+                    adj[r].push(q);
+                    adj[q].push(r);
+                }
+            }
+        }
+    }
+    for list in &mut adj {
+        list.sort_unstable();
+        list.dedup();
+    }
+    adj
+}
+
+/// Fills `sky` with `J W⁻¹ Jᵀ` from the column view of `J`.
+fn fill_gram(sky: &mut Skyline, cols: &[Vec<(usize, f64)>], inv_w: &[f64]) {
+    sky.clear();
+    for (c, entries) in cols.iter().enumerate() {
+        for (a, &(r, dr)) in entries.iter().enumerate() {
+            for &(q, dq) in &entries[..=a] {
+                sky.add(r, q, dr * dq * inv_w[c]);
+            }
+        }
+    }
 }
 
 /// Solves one cluster in place with Levenberg–Marquardt steps taken in
@@ -119,6 +202,8 @@ pub(crate) struct ClusterOutcome {
 /// Among all steps that fix the residuals, this one moves the variables the
 /// least (weighted by `weight`, higher meaning stiffer), so geometry the
 /// constraints don't pin stays where the user drew it, as in Inventor.
+/// `J W⁻¹ Jᵀ` is factored sparsely, so the cost grows with the cluster's
+/// bandwidth rather than the cube of its size.
 pub(crate) fn solve_cluster(
     x: &mut [f64],
     eqs: &[Equation],
@@ -143,60 +228,79 @@ pub(crate) fn solve_cluster(
     let sq = |f: &[f64]| f.iter().map(|v| v * v).sum::<f64>();
 
     let mut f = residuals(x);
-    if cluster.vars.is_empty() {
-        let max_residual = max_abs(&f);
-        return ClusterOutcome {
-            converged: max_residual <= settings.tolerance,
-            iterations: 0,
+    let outcome = |f: &[f64], iterations: usize, too_large: bool| {
+        let max_residual = max_abs(f);
+        ClusterOutcome {
+            converged: !too_large && max_residual <= settings.tolerance,
+            iterations,
             max_residual,
-        };
+            too_large,
+        }
+    };
+    if cluster.vars.is_empty() {
+        return outcome(&f, 0, false);
     }
 
     set_columns(col, cluster);
     let m = cluster.eqs.len();
     let n = cluster.vars.len();
     let inv_w: Vec<f64> = cluster.vars.iter().map(|&v| 1.0 / weight[v]).collect();
+    let mut rows = sparse_rows(x, eqs, cluster, col);
+    let mut cols = columns_of(&rows.iter().collect::<Vec<_>>(), n);
+    let mut gram = Skyline::new(&row_adjacency(&cols, m));
+    if gram.work() > MAX_FACTOR_WORK {
+        clear_columns(col, cluster);
+        return outcome(&f, 0, true);
+    }
+
     let mut mu = 1e-9;
     let mut iterations = 0;
-    let mut trial = x.to_vec();
+    let saved_len = cluster.vars.len();
+    let mut saved = vec![0.0; saved_len];
 
-    while max_abs(&f) > settings.tolerance && iterations < settings.max_iterations {
-        iterations += 1;
-        let j = jacobian(x, eqs, cluster, col);
-        // A = J W⁻¹ Jᵀ, symmetric positive semi-definite.
-        let mut a = vec![0.0; m * m];
-        for r in 0..m {
-            for s in 0..=r {
-                let dot: f64 = (0..n).map(|c| j[r * n + c] * inv_w[c] * j[s * n + c]).sum();
-                a[r * m + s] = dot;
-                a[s * m + r] = dot;
+    // Once within tolerance, one more step "polishes" the result to near
+    // machine precision, so errors don't add up along long chains of
+    // geometry. It is kept only if it helps.
+    let mut polished = false;
+    while iterations < settings.max_iterations {
+        if max_abs(&f) <= settings.tolerance {
+            if polished || iterations == 0 {
+                break;
             }
+            polished = true;
         }
-        let scale = ((0..m).map(|r| a[r * m + r]).sum::<f64>() / m as f64).max(1e-12);
+        iterations += 1;
+        if iterations > 1 {
+            rows = sparse_rows(x, eqs, cluster, col);
+            cols = columns_of(&rows.iter().collect::<Vec<_>>(), n);
+        }
+        fill_gram(&mut gram, &cols, &inv_w);
+        let scale = (gram.diagonal_sum() / m as f64).max(1e-12);
 
         let f_sq = sq(&f);
         let mut improved = false;
         while mu < 1e8 {
-            let mut damped = a.clone();
-            for r in 0..m {
-                damped[r * m + r] += mu * scale;
-            }
-            let Some(y) = cholesky_solve(&mut damped, m, &f) else {
+            let mut damped = gram.clone();
+            damped.add_to_diagonal(mu * scale);
+            if !damped.factor() {
                 mu *= 10.0;
                 continue;
-            };
-            trial.copy_from_slice(x);
-            for (c, &v) in cluster.vars.iter().enumerate() {
-                let step: f64 = (0..m).map(|r| j[r * n + c] * y[r]).sum();
-                trial[v] -= inv_w[c] * step;
             }
-            let f_trial = residuals(&trial);
+            let y = damped.solve(&f);
+            for (c, &v) in cluster.vars.iter().enumerate() {
+                saved[c] = x[v];
+                let step: f64 = cols[c].iter().map(|&(r, d)| d * y[r]).sum();
+                x[v] -= inv_w[c] * step;
+            }
+            let f_trial = residuals(x);
             if sq(&f_trial) < f_sq {
-                x.copy_from_slice(&trial);
                 f = f_trial;
                 mu = (mu * 0.1).max(1e-12);
                 improved = true;
                 break;
+            }
+            for (c, &v) in cluster.vars.iter().enumerate() {
+                x[v] = saved[c];
             }
             mu *= 10.0;
         }
@@ -206,48 +310,111 @@ pub(crate) fn solve_cluster(
     }
 
     clear_columns(col, cluster);
-    let max_residual = max_abs(&f);
-    ClusterOutcome {
-        converged: max_residual <= settings.tolerance,
-        iterations,
-        max_residual,
-    }
+    outcome(&f, iterations, false)
 }
 
-/// Solves `A y = b` for symmetric positive definite `A` (row-major, `n×n`),
-/// factoring `A` in place. `None` if `A` isn't numerically positive definite.
-fn cholesky_solve(a: &mut [f64], n: usize, b: &[f64]) -> Option<Vec<f64>> {
-    for i in 0..n {
-        for k in 0..=i {
-            let mut s = a[i * n + k];
-            for p in 0..k {
-                s -= a[i * n + p] * a[k * n + p];
-            }
-            if i == k {
-                if s <= 0.0 || !s.is_finite() {
-                    return None;
-                }
-                a[i * n + i] = s.sqrt();
-            } else {
-                a[i * n + k] = s / a[k * n + k];
-            }
-        }
-    }
-    let mut y = b.to_vec();
-    for i in 0..n {
-        for p in 0..i {
-            y[i] -= a[i * n + p] * y[p];
-        }
-        y[i] /= a[i * n + i];
-    }
-    for i in (0..n).rev() {
-        for p in i + 1..n {
-            y[i] -= a[p * n + i] * y[p];
-        }
-        y[i] /= a[i * n + i];
-    }
-    Some(y)
+/// How a row relates to a set of other rows of its cluster.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Dependency {
+    /// It constrains something the others don't.
+    Independent,
+    /// It is a combination of the listed equations (indices into the
+    /// sketch's equation list).
+    Redundant(Vec<usize>),
+    /// It has no usable slope here, as with a distance between two points
+    /// in the same place.
+    Degenerate,
+    /// The cluster is over the work budget.
+    TooLarge,
 }
+
+/// Decides whether row `target` (a position in `cluster.eqs`) is a linear
+/// combination of the rows at positions `base`, by solving the regularised
+/// least-squares problem `min |Jᵦᵀc − r|² + ε|c|²` with the sparse
+/// factorization. Cheap enough to run on every constraint the user adds.
+pub(crate) fn dependency(
+    x: &[f64],
+    eqs: &[Equation],
+    cluster: &Cluster,
+    col: &mut [usize],
+    base: &[usize],
+    target: usize,
+) -> Dependency {
+    set_columns(col, cluster);
+    let rows = sparse_rows(x, eqs, cluster, col);
+    clear_columns(col, cluster);
+    let n = cluster.vars.len();
+
+    let r = &rows[target];
+    let norm_r = r.iter().map(|&(_, d)| d * d).sum::<f64>().sqrt();
+    if !norm_r.is_finite() || norm_r < 1e-12 {
+        return Dependency::Degenerate;
+    }
+    if base.is_empty() {
+        return Dependency::Independent;
+    }
+    let base_rows: Vec<&Vec<(usize, f64)>> = base.iter().map(|&b| &rows[b]).collect();
+    if base_rows
+        .iter()
+        .any(|row| row.iter().any(|&(_, d)| !d.is_finite()))
+    {
+        // Degenerate earlier rows say nothing; judge against the rest.
+        let finite: Vec<usize> = base
+            .iter()
+            .copied()
+            .filter(|&b| rows[b].iter().all(|&(_, d)| d.is_finite()))
+            .collect();
+        return dependency(x, eqs, cluster, col, &finite, target);
+    }
+    let cols = columns_of(&base_rows, n);
+    let mut gram = Skyline::new(&row_adjacency(&cols, base.len()));
+    if gram.work() > MAX_FACTOR_WORK {
+        return Dependency::TooLarge;
+    }
+    fill_gram(&mut gram, &cols, &vec![1.0; n]);
+    let mut dense_r = vec![0.0; n];
+    for &(c, d) in r {
+        dense_r[c] = d;
+    }
+    let b: Vec<f64> = base_rows
+        .iter()
+        .map(|row| row.iter().map(|&(c, d)| d * dense_r[c]).sum())
+        .collect();
+
+    let mut eps = 1e-12 * (gram.diagonal_sum() / base.len() as f64).max(1e-12);
+    let c = loop {
+        let mut damped = gram.clone();
+        damped.add_to_diagonal(eps);
+        if damped.factor() {
+            break damped.solve(&b);
+        }
+        eps *= 100.0;
+        if eps > 1.0 {
+            return Dependency::Independent;
+        }
+    };
+    let mut resid = dense_r;
+    for (row, &ci) in base_rows.iter().zip(&c) {
+        for &(col_index, d) in row.iter() {
+            resid[col_index] -= ci * d;
+        }
+    }
+    let rest = resid.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if rest > DEPENDENCY_TOLERANCE * norm_r {
+        return Dependency::Independent;
+    }
+    let largest = c.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    Dependency::Redundant(
+        base.iter()
+            .zip(&c)
+            .filter(|(_, ci)| ci.abs() > 1e-6 * largest)
+            .map(|(&b, _)| cluster.eqs[b])
+            .collect(),
+    )
+}
+
+/// Relative leftover below which [`dependency`] calls a row redundant.
+const DEPENDENCY_TOLERANCE: f64 = 1e-6;
 
 /// Structural facts about one cluster at the current variable values.
 #[derive(Debug, Default)]
@@ -259,6 +426,8 @@ pub(crate) struct ClusterAnalysis {
     /// Equations (indices into the sketch's equation list) that add nothing
     /// to the ones before them, each with the earlier equations it depends on.
     pub redundant: Vec<(usize, Vec<usize>)>,
+    /// The cluster was over the analysis budget and wasn't analysed.
+    pub too_large: bool,
 }
 
 /// Relative size below which a Jacobian row counts as dependent on earlier
@@ -282,6 +451,13 @@ pub(crate) fn analyse_cluster(
         // impossible; both read as redundant.
         return ClusterAnalysis {
             redundant: cluster.eqs.iter().map(|&e| (e, Vec::new())).collect(),
+            ..Default::default()
+        };
+    }
+    let m = cluster.eqs.len();
+    if (m * n) as f64 * m.min(n) as f64 > MAX_ANALYSIS_WORK {
+        return ClusterAnalysis {
+            too_large: true,
             ..Default::default()
         };
     }
@@ -368,7 +544,7 @@ mod tests {
         Equation {
             kind: EqKind::Linear { coeffs, constant },
             vars,
-            owner: Owner::Constraint(0),
+            owner: Owner::Constraint(uuid::Uuid::nil()),
         }
     }
 
@@ -387,14 +563,6 @@ mod tests {
         assert_eq!(cs[0].vars, vec![0, 1, 3]);
         assert_eq!(cs[1].vars, vec![2]);
         assert!(cs[2].vars.is_empty());
-    }
-
-    #[test]
-    fn cholesky_solves_spd_system() {
-        let mut a = vec![4.0, 2.0, 2.0, 3.0];
-        let y = cholesky_solve(&mut a, 2, &[2.0, 1.0]).unwrap();
-        assert!((4.0 * y[0] + 2.0 * y[1] - 2.0).abs() < 1e-12);
-        assert!((2.0 * y[0] + 3.0 * y[1] - 1.0).abs() < 1e-12);
     }
 
     #[test]

@@ -203,8 +203,8 @@ fn line_distance<T: Real>(v: &[T], px: T, py: T) -> T {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Owner {
     /// Built into a curve, such as an arc's endpoints lying on its circle.
-    Curve(u32),
-    Constraint(u32),
+    Curve(uuid::Uuid),
+    Constraint(uuid::Uuid),
 }
 
 #[derive(Debug, Clone)]
@@ -286,7 +286,7 @@ mod tests {
             let eq = Equation {
                 kind: kind.clone(),
                 vars: (0..n).collect(),
-                owner: Owner::Curve(0),
+                owner: Owner::Curve(uuid::Uuid::nil()),
             };
             let mut grad = vec![0.0; n];
             eq.gradient(&x, |_| true, |i, d| grad[i] += d);
