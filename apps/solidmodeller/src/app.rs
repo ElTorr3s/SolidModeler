@@ -7,9 +7,17 @@ use crate::viewcube::ViewCube;
 use crate::worker::{Done, Worker};
 use egui::{Key, Modifiers, PointerButton, Sense};
 use glam::Vec2;
-use sm_document::{FeatureId, PartDocument};
+use sm_document::{FeatureId, LengthUnit, PartDocument};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
+
+/// How the app starts.
+pub enum Start {
+    /// The built-in demo part, saved to `save_to` on Ctrl+S if given.
+    Demo { save_to: Option<PathBuf> },
+    /// Load this file on the worker.
+    Open(PathBuf),
+}
 
 /// What is selected: a feature (from the browser or a pick) and, after a
 /// pick in the viewport, the face under the cursor.
@@ -63,7 +71,7 @@ pub struct SolidApp {
 }
 
 impl SolidApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, doc: PartDocument, path: Option<PathBuf>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, start: Start) -> Self {
         let render_state = cc
             .wgpu_render_state
             .as_ref()
@@ -78,6 +86,11 @@ impl SolidApp {
 
         let ctx = cc.egui_ctx.clone();
         let worker = Worker::new(move || ctx.request_repaint());
+        let (doc, path, open) = match start {
+            Start::Demo { save_to } => (crate::demo::document(), save_to, None),
+            // Empty until the file arrives from the worker.
+            Start::Open(path) => (PartDocument::new("", LengthUnit::Mm), None, Some(path)),
+        };
         let mut app = SolidApp {
             doc,
             path,
@@ -103,7 +116,13 @@ impl SolidApp {
             scheme: ColorScheme::NoPreference,
             palette,
         };
-        app.rebuild();
+        match open {
+            Some(path) => {
+                app.status = Some(format!("Opening {}…", path.display()));
+                app.worker.open(path);
+            }
+            None => app.rebuild(),
+        }
         app
     }
 
@@ -155,8 +174,8 @@ impl SolidApp {
                     Err(e) => self.rebuild_error = Some(e),
                 },
                 Done::Opened { path, result } => match result {
-                    Ok(doc) => {
-                        self.doc = doc;
+                    Ok(loaded) => {
+                        self.doc = loaded;
                         self.path = Some(path);
                         self.modified = false;
                         self.has_geometry = false;

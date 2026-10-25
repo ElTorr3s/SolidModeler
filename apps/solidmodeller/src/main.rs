@@ -19,8 +19,10 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (doc, path) = match args.as_slice() {
-        [] => (demo::document(), None),
+    // An existing file is loaded on the app's worker thread, so a large
+    // file shows the window (and a spinner) instead of a frozen start.
+    let start = match args.as_slice() {
+        [] => app::Start::Demo { save_to: None },
         [p] if p.starts_with('-') => {
             eprintln!("usage: solidmodeller [part.smp]");
             return ExitCode::FAILURE;
@@ -28,15 +30,11 @@ fn main() -> ExitCode {
         [p] => {
             let path = PathBuf::from(p);
             if path.exists() {
-                match sm_format::open(&path) {
-                    Ok(file) => (file.document, Some(path)),
-                    Err(e) => {
-                        eprintln!("error: {p}: {e}");
-                        return ExitCode::FAILURE;
-                    }
-                }
+                app::Start::Open(path)
             } else {
-                (demo::document(), Some(path))
+                app::Start::Demo {
+                    save_to: Some(path),
+                }
             }
         }
         _ => {
@@ -58,7 +56,7 @@ fn main() -> ExitCode {
     let result = eframe::run_native(
         "SolidModeller",
         options,
-        Box::new(move |cc| Ok(Box::new(app::SolidApp::new(cc, doc, path)))),
+        Box::new(move |cc| Ok(Box::new(app::SolidApp::new(cc, start)))),
     );
     match result {
         Ok(()) => ExitCode::SUCCESS,
