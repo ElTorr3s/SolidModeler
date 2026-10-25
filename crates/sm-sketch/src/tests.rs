@@ -1046,3 +1046,40 @@ fn large_chain_is_analysed_sparsely() {
     assert_eq!(a.dof, 1);
     assert_eq!(a.free_points, vec![prev]);
 }
+
+#[test]
+fn arcs_off_their_circle_are_reported() {
+    let mut s = Sketch::new();
+    let c = s.add_point(0.0, 0.0).unwrap();
+    let a = s.add_point(5.0, 0.0).unwrap();
+    let b = s.add_point(0.0, 5.0).unwrap();
+    let arc = s.add_arc(c, a, b).unwrap();
+    s.add_constraint(Constraint::Fix(Entity::Point(a))).unwrap();
+    assert!(s.analyse().inconsistent_curves.is_empty());
+    // A fix loaded without solving pulls the end off the circle.
+    let mut json: serde_json::Value = serde_json::to_value(&s).unwrap();
+    for p in json["points"].as_array_mut().unwrap() {
+        if p["id"] == serde_json::json!(b) {
+            p["y"] = serde_json::json!(9.0);
+        }
+    }
+    let mut loaded: Sketch = serde_json::from_value(json).unwrap();
+    assert_eq!(loaded.analyse().inconsistent_curves, vec![arc]);
+    assert!(loaded.solve().converged);
+    assert!(loaded.analyse().inconsistent_curves.is_empty());
+}
+
+#[test]
+fn nan_residuals_count_as_unsatisfied() {
+    // A line collapsed to a point makes point-on-line read NaN; loaded
+    // unchecked, it must show as broken, not as holding.
+    let mut s = Sketch::new();
+    let a = s.add_point(1.0, 1.0).unwrap();
+    let b = s.add_point(1.0, 1.0).unwrap();
+    let line = s.add_line(a, b).unwrap();
+    let p = s.add_point(3.0, 3.0).unwrap();
+    let on = s
+        .add_constraint_unchecked(Constraint::PointOnCurve(p, line))
+        .unwrap();
+    assert_eq!(s.analyse().unsatisfied, vec![on]);
+}

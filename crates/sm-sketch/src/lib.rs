@@ -336,6 +336,9 @@ pub struct Analysis {
     pub redundant: Vec<Redundancy>,
     /// Driving constraints that don't currently hold.
     pub unsatisfied: Vec<ConstraintId>,
+    /// Arcs whose endpoints are currently off their own circle, which
+    /// happens only before a solve converges.
+    pub inconsistent_curves: Vec<CurveId>,
     /// Points that can still move.
     pub free_points: Vec<PointId>,
     /// Curves that can still move or change size.
@@ -1040,9 +1043,16 @@ impl Sketch {
         }
 
         let tolerance = self.tolerance();
-        let mut unsatisfied: Vec<ConstraintId> = eqs
+        // A NaN residual counts as broken.
+        let broken: Vec<&Equation> = eqs
             .iter()
-            .filter(|e| e.residual(&self.vars).abs() > tolerance)
+            .filter(|e| {
+                let r = e.residual(&self.vars).abs();
+                r.is_nan() || r > tolerance
+            })
+            .collect();
+        let mut unsatisfied: Vec<ConstraintId> = broken
+            .iter()
             .filter_map(|e| match e.owner {
                 Owner::Constraint(c) => Some(ConstraintId(c)),
                 Owner::Curve(_) => None,
@@ -1050,6 +1060,15 @@ impl Sketch {
             .collect();
         unsatisfied.sort();
         unsatisfied.dedup();
+        let mut inconsistent_curves: Vec<CurveId> = broken
+            .iter()
+            .filter_map(|e| match e.owner {
+                Owner::Curve(c) => Some(CurveId(c)),
+                Owner::Constraint(_) => None,
+            })
+            .collect();
+        inconsistent_curves.sort();
+        inconsistent_curves.dedup();
         for r in &mut redundant {
             r.satisfied = !unsatisfied.contains(&r.constraint);
         }
@@ -1088,6 +1107,7 @@ impl Sketch {
             status,
             redundant,
             unsatisfied,
+            inconsistent_curves,
             free_points,
             free_curves,
         }
