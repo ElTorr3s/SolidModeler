@@ -408,33 +408,10 @@ fn rebuilds_are_deterministic() {
     // names, and what each name points at, must not change.
     let (doc, _) = slotted_block();
     let all = |r: &sm_naming::NamedRebuild| -> BTreeSet<String> {
-        let b = &r.naming().bodies[0];
-        let mut out = BTreeSet::new();
-        for (i, f) in b.faces.iter().enumerate() {
-            let e = EntityRef {
-                kind: EntityKind::Face,
-                body: 0,
-                index: i,
-            };
-            out.insert(format!("{f} {:?}", plane_face(r, e)));
-        }
-        for (i, n) in b.edges.iter().enumerate() {
-            let e = EntityRef {
-                kind: EntityKind::Edge,
-                body: 0,
-                index: i,
-            };
-            out.insert(format!("{n} {:?}", edge_points(r, e)));
-        }
-        for (i, n) in b.vertices.iter().enumerate() {
-            let e = EntityRef {
-                kind: EntityKind::Vertex,
-                body: 0,
-                index: i,
-            };
-            out.insert(format!("{n} {:?}", vertex_point(r, e)));
-        }
-        out
+        all_entities(r)
+            .into_iter()
+            .map(|e| format!("{} {}", r.naming().name_of(e), plane_or_point(r, e)))
+            .collect()
     };
     let first = all(&build(&doc));
     for _ in 0..5 {
@@ -446,15 +423,7 @@ fn rebuilds_are_deterministic() {
 fn names_round_trip_through_json() {
     let (doc, _) = slotted_block();
     let r = build(&doc);
-    let b = &r.naming().bodies[0];
-    let all: Vec<TopoName> = b
-        .faces
-        .iter()
-        .cloned()
-        .map(TopoName::Face)
-        .chain(b.edges.iter().cloned().map(TopoName::Edge))
-        .chain(b.vertices.iter().cloned().map(TopoName::Vertex))
-        .collect();
+    let all = all_names(&r);
     for n in &all {
         let json = serde_json::to_string(n).unwrap();
         let back: TopoName = serde_json::from_str(&json).unwrap();
@@ -531,15 +500,7 @@ fn renumbered_features_keep_references_valid() {
     // resolve on the renumbered part exactly as before.
     let (doc, _) = slotted_block();
     let r = build(&doc);
-    let b = &r.naming().bodies[0];
-    let names: Vec<TopoName> = b
-        .faces
-        .iter()
-        .cloned()
-        .map(TopoName::Face)
-        .chain(b.edges.iter().cloned().map(TopoName::Edge))
-        .chain(b.vertices.iter().cloned().map(TopoName::Vertex))
-        .collect();
+    let names = all_names(&r);
 
     // Renumber as 200 - id, which also reverses the sort order of ids.
     let map = |id: sm_document::FeatureId| sm_document::FeatureId(200 - id.0);
@@ -635,15 +596,7 @@ fn batch_resolver_agrees_with_single_resolution() {
     let (doc, _) = slotted_block();
     let r = build(&doc);
     let resolver = r.naming().resolver();
-    let b = &r.naming().bodies[0];
-    let names = b
-        .faces
-        .iter()
-        .cloned()
-        .map(TopoName::Face)
-        .chain(b.edges.iter().cloned().map(TopoName::Edge))
-        .chain(b.vertices.iter().cloned().map(TopoName::Vertex));
-    for n in names {
+    for n in all_names(&r) {
         let one = r.naming().resolve(&n);
         assert!(matches!(one, Resolution::Exact(_)), "{n}");
         assert_eq!(resolver.resolve(&n), one);

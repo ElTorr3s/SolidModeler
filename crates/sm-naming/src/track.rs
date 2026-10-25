@@ -1,10 +1,10 @@
-//! Follows a rebuild and carries face origins through every boolean.
+//! Follows a rebuild and carries face origins through every feature.
 
-use crate::naming::{name_body, BodyNaming};
+use crate::naming::name_model;
 use crate::tools::{extrude_tool, FaceOrigins};
 use crate::Naming;
 use sm_document::{FeatureId, FeatureKind, PartDocument};
-use sm_kernel::{BodyChange, ExtrudeTool, RebuildObserver, LINEAR_TOLERANCE};
+use sm_kernel::{Body, ExtrudeTool, RebuildObserver};
 use std::sync::Arc;
 use truck_modeling::Solid;
 
@@ -14,63 +14,39 @@ pub(crate) struct BodyState {
     pub origins: FaceOrigins,
 }
 
-impl BodyState {
-    pub fn naming(&self) -> BodyNaming {
-        name_body(&self.solid, &self.origins)
-    }
+/// True if two solids are the same truck object: same faces, same ids.
+/// Bodies a feature doesn't touch are kept as they were.
+fn same_solid(a: &Solid, b: &Solid) -> bool {
+    let ids = |s: &Solid| -> Vec<_> {
+        s.boundaries()
+            .iter()
+            .flat_map(|shell| shell.face_iter().map(|f| f.id()))
+            .collect()
+    };
+    ids(a) == ids(b)
 }
 
-/// One step of the rebuild, as the tracker logs it.
-#[derive(Debug, Clone)]
-pub(crate) enum Change {
-    Created(usize, Arc<BodyState>),
-    Modified(usize, Arc<BodyState>),
-    Removed(usize),
-}
-
-impl Change {
-    pub fn apply(&self, bodies: &mut Vec<Arc<BodyState>>) {
-        match self {
-            Change::Created(i, b) => bodies.insert((*i).min(bodies.len()), b.clone()),
-            Change::Modified(i, b) => {
-                if let Some(slot) = bodies.get_mut(*i) {
-                    *slot = b.clone();
-                }
-            }
-            Change::Removed(i) => {
-                if *i < bodies.len() {
-                    bodies.remove(*i);
-                }
-            }
-        }
-    }
-}
-
-/// A [`RebuildObserver`] that records where every face came from. It logs
-/// each body change rather than copying all bodies per feature, so memory
-/// grows with the number of booleans, not features times bodies; the state
-/// at any point in the history is recovered by replaying the log.
+/// A [`RebuildObserver`] that records where every face came from, and the
+/// bodies after each feature. Bodies a feature leaves alone are shared
+/// between states, so each state costs one pointer per body plus the bodies
+/// that feature actually changed.
 pub(crate) struct Tracker<'d> {
     doc: &'d PartDocument,
-    tool: FaceOrigins,
+    /// Origins of every tool the current feature has built so far.
+    tools: FaceOrigins,
     pub bodies: Vec<Arc<BodyState>>,
-    /// Every body change, in history order.
-    pub changes: Vec<(FeatureId, Change)>,
+    /// Bodies after each feature that built geometry, in history order.
+    pub states: Vec<(FeatureId, Vec<Arc<BodyState>>)>,
 }
 
 impl<'d> Tracker<'d> {
     pub fn new(doc: &'d PartDocument) -> Self {
         Tracker {
             doc,
-            tool: FaceOrigins::default(),
+            tools: FaceOrigins::default(),
             bodies: Vec::new(),
-            changes: Vec::new(),
+            states: Vec::new(),
         }
-    }
-
-    fn record(&mut self, feature: FeatureId, change: Change) {
-        change.apply(&mut self.bodies);
-        self.changes.push((feature, change));
     }
 }
 
@@ -85,43 +61,50 @@ impl RebuildObserver for Tracker<'_> {
         };
         // The kernel always sweeps along +normal; a tool that ends at the
         // sketch plane came from a negative distance.
-        let reversed = tool.start < 0.0 && (tool.start + tool.length).abs() <= LINEAR_TOLERANCE;
-        self.tool = extrude_tool(
+        let reversed = tool.start < 0.0 && (tool.start + tool.length).abs() <= tool.tol.linear;
+        let origins = extrude_tool(
             feature,
             profiles,
             tool.region,
             tool.frame,
             reversed,
             tool.solid,
+            tool.tol.linear,
         );
+        self.tools.extend(&origins);
     }
 
-    fn body_created(&mut self, feature: FeatureId, body: usize, solid: &Solid) {
-        let state = BodyState {
-            solid: solid.clone(),
-            origins: std::mem::take(&mut self.tool),
-        };
-        self.record(feature, Change::Created(body, Arc::new(state)));
-    }
-
-    fn body_modified(&mut self, feature: FeatureId, body: usize, change: &BodyChange<'_>) {
-        let Some(state) = self.bodies.get(body) else {
-            return;
-        };
-        let state = BodyState {
-            origins: FaceOrigins::carried(change.after, &[&state.origins, &self.tool]),
-            solid: change.after.clone(),
-        };
-        self.record(feature, Change::Modified(body, Arc::new(state)));
-    }
-
-    fn body_removed(&mut self, feature: FeatureId, body: usize) {
-        self.record(feature, Change::Removed(body));
+    fn bodies_changed(&mut self, feature: FeatureId, bodies: &[Body]) {
+        // Every face of the new bodies comes from a face of an old body or
+        // of one of this feature's tools.
+        let mut sources = std::mem::take(&mut self.tools);
+        for old in &self.bodies {
+            sources.extend(&old.origins);
+        }
+        let next = bodies
+            .iter()
+            .map(|body| {
+                match self
+                    .bodies
+                    .iter()
+                    .find(|old| same_solid(&old.solid, &body.solid))
+                {
+                    Some(old) => old.clone(),
+                    None => Arc::new(BodyState {
+                        origins: FaceOrigins::carried(&body.solid, &sources),
+                        solid: body.solid.clone(),
+                    }),
+                }
+            })
+            .collect();
+        self.bodies = next;
+        self.states.push((feature, self.bodies.clone()));
     }
 }
 
 pub(crate) fn naming(bodies: &[Arc<BodyState>]) -> Naming {
+    let bodies: Vec<_> = bodies.iter().map(|b| (&b.solid, &b.origins)).collect();
     Naming {
-        bodies: bodies.iter().map(|b| b.naming()).collect(),
+        bodies: name_model(&bodies),
     }
 }

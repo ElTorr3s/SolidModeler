@@ -7,7 +7,7 @@
 
 use sm_document::{FeatureId, Profile};
 use sm_kernel::profile::{Point2, Region};
-use sm_kernel::{Frame, LINEAR_TOLERANCE};
+use sm_kernel::Frame;
 use sm_naming_types::{FaceOrigin, FaceRole, SketchEdge};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -57,18 +57,26 @@ impl FaceOrigins {
         self.by_surface.get(&key).map_or(0, Vec::len)
     }
 
-    /// Origins for the faces of `solid`, taken from `sources`.
-    pub(crate) fn carried(solid: &Solid, sources: &[&FaceOrigins]) -> FaceOrigins {
+    /// Origins for the faces of `solid`, taken from `sources` (all the
+    /// faces that went into the operation that made it).
+    pub(crate) fn carried(solid: &Solid, sources: &FaceOrigins) -> FaceOrigins {
         let mut out = FaceOrigins::default();
         for face in faces(solid) {
             let key = surface_key(&face);
-            for source in sources {
-                for &origin in source.by_surface.get(&key).into_iter().flatten() {
-                    out.insert(key, origin);
-                }
+            for &origin in sources.by_surface.get(&key).into_iter().flatten() {
+                out.insert(key, origin);
             }
         }
         out
+    }
+
+    /// Adds every origin of `other`.
+    pub(crate) fn extend(&mut self, other: &FaceOrigins) {
+        for (&key, origins) in &other.by_surface {
+            for &origin in origins {
+                self.insert(key, origin);
+            }
+        }
     }
 }
 
@@ -82,8 +90,8 @@ pub(crate) fn faces(solid: &Solid) -> impl Iterator<Item = Face> + '_ {
 /// Finds the document segment a cleaned region segment came from. The
 /// kernel drops repeated points and may reverse loops, so match endpoints
 /// in either direction within tolerance.
-fn sketch_edge(profiles: &[Profile], a: Point2, b: Point2) -> Option<SketchEdge> {
-    let near = |p: Point2, q: Point2| (p[0] - q[0]).hypot(p[1] - q[1]) <= LINEAR_TOLERANCE;
+fn sketch_edge(profiles: &[Profile], a: Point2, b: Point2, eps: f64) -> Option<SketchEdge> {
+    let near = |p: Point2, q: Point2| (p[0] - q[0]).hypot(p[1] - q[1]) <= eps;
     profiles.iter().enumerate().find_map(|(i, profile)| {
         let n = profile.points.len();
         (0..n).find_map(|j| {
@@ -96,8 +104,8 @@ fn sketch_edge(profiles: &[Profile], a: Point2, b: Point2) -> Option<SketchEdge>
     })
 }
 
-fn outer_profile(profiles: &[Profile], region: &Region) -> Option<u32> {
-    sketch_edge(profiles, region.outer[0], region.outer[1]).map(|e| e.profile)
+fn outer_profile(profiles: &[Profile], region: &Region, eps: f64) -> Option<u32> {
+    sketch_edge(profiles, region.outer[0], region.outer[1], eps).map(|e| e.profile)
 }
 
 fn segments(region: &Region) -> impl Iterator<Item = (Point2, Point2)> + '_ {
@@ -116,7 +124,8 @@ fn plane_normal(face: &Face) -> Option<Vector3> {
 /// Names the faces of an extrude tool built from `region` of a sketch with
 /// `profiles`, on `frame`. `reversed` is true when the extrude runs against
 /// the sketch normal; the start cap is always the one on the sketch side, so
-/// flipping an extrude's direction keeps its names.
+/// flipping an extrude's direction keeps its names. `eps` is the part's
+/// linear tolerance, in its own units.
 pub fn extrude_tool(
     feature: FeatureId,
     profiles: &[Profile],
@@ -124,10 +133,11 @@ pub fn extrude_tool(
     frame: &Frame,
     reversed: bool,
     solid: &Solid,
+    eps: f64,
 ) -> FaceOrigins {
     // Without a known outer loop, caps stay unnamed rather than colliding
     // with another region's caps.
-    let profile = outer_profile(profiles, region);
+    let profile = outer_profile(profiles, region, eps);
     let start = profile.map(|profile| FaceRole::StartCap { profile });
     let end = profile.map(|profile| FaceRole::EndCap { profile });
     let (below, above) = if reversed { (end, start) } else { (start, end) };
@@ -146,7 +156,7 @@ pub fn extrude_tool(
                 let n = normal.unwrap();
                 let points: Vec<Point2> = face.vertex_iter().map(|v| to_2d(v.point())).collect();
                 side_segment(region, [n.dot(frame.u), n.dot(frame.v)], &points)
-                    .and_then(|(a, b)| sketch_edge(profiles, a, b))
+                    .and_then(|(a, b)| sketch_edge(profiles, a, b, eps))
                     .map(|edge| FaceRole::Side { edge, piece: 0 })
             }
             None => None,
@@ -206,8 +216,9 @@ pub fn revolve_tool(
     frame: &Frame,
     axis: RevolveAxis,
     solid: &Solid,
+    eps: f64,
 ) -> FaceOrigins {
-    let profile = outer_profile(profiles, region);
+    let profile = outer_profile(profiles, region, eps);
     let (dir, angle) = if axis.angle < 0.0 {
         (-axis.direction.normalize(), -axis.angle)
     } else {
@@ -222,7 +233,7 @@ pub fn revolve_tool(
     };
     let e1 = segments(region)
         .map(|(a, _)| radial(at(a)))
-        .find(|r| r.magnitude() > LINEAR_TOLERANCE)
+        .find(|r| r.magnitude() > eps)
         .map(|r| r.normalize());
     let Some(e1) = e1 else {
         return FaceOrigins::default();
@@ -230,8 +241,7 @@ pub fn revolve_tool(
     let e2 = dir.cross(e1);
     let phi = |p: Point3| {
         let r = radial(p);
-        (r.magnitude() > LINEAR_TOLERANCE)
-            .then(|| r.dot(e2).atan2(r.dot(e1)).rem_euclid(std::f64::consts::TAU))
+        (r.magnitude() > eps).then(|| r.dot(e2).atan2(r.dot(e1)).rem_euclid(std::f64::consts::TAU))
     };
     let rh = |p: Point3| {
         let d = p - axis.origin;
@@ -260,7 +270,7 @@ pub fn revolve_tool(
                 let (a, b) = (rh(at(a)), rh(at(b)));
                 points.iter().all(|&p| near(rh(p), a) || near(rh(p), b))
             });
-            if let Some(edge) = segment.and_then(|(a, b)| sketch_edge(profiles, a, b)) {
+            if let Some(edge) = segment.and_then(|(a, b)| sketch_edge(profiles, a, b, eps)) {
                 // Named below, once all pieces of the face are known.
                 sides.push((edge, mid_angle(&face, &phi), key));
                 continue;
@@ -372,7 +382,8 @@ mod tests {
                 direction: Vector3::unit_z(),
                 angle,
             };
-            let origins = revolve_tool(FeatureId(3), &profiles, &region, &frame, axis, &solid);
+            let origins =
+                revolve_tool(FeatureId(3), &profiles, &region, &frame, axis, &solid, 1e-6);
             let got: BTreeSet<FaceRole> = roles(&origins, &solid).into_iter().collect();
             let mut want: BTreeSet<FaceRole> = (0..4)
                 .flat_map(|s| (0..pieces).map(move |p| side(s, p)))
@@ -406,7 +417,7 @@ mod tests {
             direction: Vector3::unit_z(),
             angle: std::f64::consts::TAU,
         };
-        let origins = revolve_tool(FeatureId(3), &profiles, &region, &frame, axis, &solid);
+        let origins = revolve_tool(FeatureId(3), &profiles, &region, &frame, axis, &solid, 1e-6);
         let all = roles(&origins, &solid);
         let unique: BTreeSet<FaceRole> = all.iter().copied().collect();
         assert_eq!(all.len(), unique.len(), "{all:?}");
@@ -460,7 +471,7 @@ mod tests {
             direction: Vector3::unit_z(),
             angle,
         };
-        let origins = revolve_tool(FeatureId(1), &profiles, &region, &frame, axis, &solid);
+        let origins = revolve_tool(FeatureId(1), &profiles, &region, &frame, axis, &solid, 1e-6);
         for f in faces(&solid) {
             assert!(origins.get(surface_key(&f)).is_some());
         }
@@ -469,7 +480,15 @@ mod tests {
             outer: vec![[0.0, 0.0], [0.0, 1.0], [0.0, 2.0]],
             holes: Vec::new(),
         };
-        let none = revolve_tool(FeatureId(1), &profiles, &on_axis, &frame, axis, &solid);
+        let none = revolve_tool(
+            FeatureId(1),
+            &profiles,
+            &on_axis,
+            &frame,
+            axis,
+            &solid,
+            1e-6,
+        );
         assert!(faces(&solid).all(|f| none.get(surface_key(&f)).is_none()));
     }
 
@@ -479,7 +498,7 @@ mod tests {
         // after a guessed loop, so caps (and sides) are unknown and unique.
         let (_, region, frame, face) = setup();
         let solid = builder::tsweep(&face, frame.normal * 2.0);
-        let origins = extrude_tool(FeatureId(1), &[], &region, &frame, false, &solid);
+        let origins = extrude_tool(FeatureId(1), &[], &region, &frame, false, &solid, 1e-6);
         let all = roles(&origins, &solid);
         assert!(
             all.iter().all(|r| matches!(r, FaceRole::Unknown { .. })),
@@ -501,20 +520,20 @@ mod tests {
         ];
         let e = |profile, segment| SketchEdge { profile, segment };
         assert_eq!(
-            sketch_edge(&profiles, [1.0, 0.0], [0.0, 0.0]),
+            sketch_edge(&profiles, [1.0, 0.0], [0.0, 0.0], 1e-6),
             Some(e(0, 0))
         );
         // After the repeated point is dropped, (1,0)-(1,1) is segment 2.
         assert_eq!(
-            sketch_edge(&profiles, [1.0, 0.0], [1.0, 1.0]),
+            sketch_edge(&profiles, [1.0, 0.0], [1.0, 1.0], 1e-6),
             Some(e(0, 2))
         );
         // Closing segment, implicit in profile 1.
         assert_eq!(
-            sketch_edge(&profiles, [5.0, 5.0], [6.0, 6.0]),
+            sketch_edge(&profiles, [5.0, 5.0], [6.0, 6.0], 1e-6),
             Some(e(1, 2))
         );
-        assert_eq!(sketch_edge(&profiles, [9.0, 9.0], [6.0, 6.0]), None);
-        assert_eq!(sketch_edge(&[], [0.0, 0.0], [1.0, 0.0]), None);
+        assert_eq!(sketch_edge(&profiles, [9.0, 9.0], [6.0, 6.0], 1e-6), None);
+        assert_eq!(sketch_edge(&[], [0.0, 0.0], [1.0, 0.0], 1e-6), None);
     }
 }

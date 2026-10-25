@@ -138,15 +138,37 @@ pub fn vertex_point(rebuilt: &NamedRebuild, e: EntityRef) -> [f64; 3] {
     [r(p.x), r(p.y), r(p.z)]
 }
 
-/// Index of the unique face of body 0 matching `pred`.
+/// Every entity of every body, faces first, then edges, then vertices.
+pub fn all_entities(rebuilt: &NamedRebuild) -> Vec<EntityRef> {
+    let mut out = Vec::new();
+    for (kind, count) in [
+        (
+            EntityKind::Face,
+            (|b: &sm_naming::BodyNaming| b.faces.len()) as fn(&_) -> usize,
+        ),
+        (EntityKind::Edge, |b| b.edges.len()),
+        (EntityKind::Vertex, |b| b.vertices.len()),
+    ] {
+        for (body, naming) in rebuilt.naming().bodies.iter().enumerate() {
+            out.extend((0..count(naming)).map(|index| EntityRef { kind, body, index }));
+        }
+    }
+    out
+}
+
+/// Every name in the model.
+pub fn all_names(rebuilt: &NamedRebuild) -> Vec<TopoName> {
+    all_entities(rebuilt)
+        .into_iter()
+        .map(|e| rebuilt.naming().name_of(e))
+        .collect()
+}
+
+/// The unique face, on any body, matching `pred`.
 pub fn find_face(rebuilt: &NamedRebuild, pred: impl Fn(&PlaneFace) -> bool) -> EntityRef {
-    let n = rebuilt.naming().bodies[0].faces.len();
-    let hits: Vec<_> = (0..n)
-        .map(|index| EntityRef {
-            kind: EntityKind::Face,
-            body: 0,
-            index,
-        })
+    let hits: Vec<_> = all_entities(rebuilt)
+        .into_iter()
+        .filter(|e| e.kind == EntityKind::Face)
         .filter(|&e| pred(&plane_face(rebuilt, e)))
         .collect();
     assert_eq!(hits.len(), 1, "expected one matching face, got {hits:?}");

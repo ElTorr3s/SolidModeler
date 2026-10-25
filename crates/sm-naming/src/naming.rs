@@ -81,7 +81,21 @@ pub struct BodyNaming {
     pub neighbours: Vec<Vec<FaceOrigin>>,
 }
 
+#[cfg(test)]
 pub(crate) fn name_body(solid: &Solid, origins: &FaceOrigins) -> BodyNaming {
+    name_model(&[(solid, origins)]).pop().unwrap()
+}
+
+/// One body's entities with the origin of each face.
+struct Traced {
+    ent: Entities,
+    face_origins: Vec<FaceOrigin>,
+    untraced: Vec<usize>,
+    neighbours: Vec<BTreeSet<FaceOrigin>>,
+    vertex_index: HashMap<truck_modeling::topology::VertexID, usize>,
+}
+
+fn trace(solid: &Solid, origins: &FaceOrigins, unknown: &mut u32) -> Traced {
     let ent = Entities::of(solid);
     let untraced: Vec<usize> = ent
         .faces
@@ -90,21 +104,19 @@ pub(crate) fn name_body(solid: &Solid, origins: &FaceOrigins) -> BodyNaming {
         .filter(|(_, face)| origins.count(surface_key(face)) != 1)
         .map(|(i, _)| i)
         .collect();
-    let mut unknown = 0;
     let face_origins: Vec<FaceOrigin> = ent
         .faces
         .iter()
         .map(|face| {
             origins.get(surface_key(face)).unwrap_or_else(|| {
-                unknown += 1;
+                *unknown += 1;
                 FaceOrigin {
                     feature: FeatureId(0),
-                    role: FaceRole::Unknown { ordinal: unknown },
+                    role: FaceRole::Unknown { ordinal: *unknown },
                 }
             })
         })
         .collect();
-
     // Neighbours of each face across its edges, by origin.
     let mut neighbours: Vec<BTreeSet<FaceOrigin>> = vec![BTreeSet::new(); ent.faces.len()];
     for faces in &ent.edge_faces {
@@ -116,50 +128,99 @@ pub(crate) fn name_body(solid: &Solid, origins: &FaceOrigins) -> BodyNaming {
             }
         }
     }
+    let vertex_index = ent
+        .vertices
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (v.id(), i))
+        .collect();
+    Traced {
+        ent,
+        face_origins,
+        untraced,
+        neighbours,
+        vertex_index,
+    }
+}
 
-    let face_center = |f: usize| centroid(ent.faces[f].vertex_iter().map(|v| v.point()));
-    let faces = disambiguate(
-        &face_origins,
-        |f| neighbours[f].clone(),
-        face_center,
+/// Names every entity of every body. Disambiguation runs across the whole
+/// part, because a cut that splits a body in two leaves fragments of one
+/// face in different bodies.
+pub(crate) fn name_model(bodies: &[(&Solid, &FaceOrigins)]) -> Vec<BodyNaming> {
+    let mut unknown = 0;
+    let traced: Vec<Traced> = bodies
+        .iter()
+        .map(|(solid, origins)| trace(solid, origins, &mut unknown))
+        .collect();
+    // Flatten (body, index) into one numbering per entity kind.
+    let flat = |count: fn(&Traced) -> usize| -> Vec<(usize, usize)> {
+        traced
+            .iter()
+            .enumerate()
+            .flat_map(|(b, t)| (0..count(t)).map(move |i| (b, i)))
+            .collect()
+    };
+    let all_faces = flat(|t| t.ent.faces.len());
+    let all_edges = flat(|t| t.ent.edges.len());
+    let all_vertices = flat(|t| t.ent.vertices.len());
+
+    let face_keys: Vec<FaceOrigin> = all_faces
+        .iter()
+        .map(|&(b, i)| traced[b].face_origins[i])
+        .collect();
+    let flat_faces = disambiguate(
+        &face_keys,
+        |g| {
+            let (b, i) = all_faces[g];
+            traced[b].neighbours[i].clone()
+        },
+        |g| {
+            let (b, i) = all_faces[g];
+            centroid(traced[b].ent.faces[i].vertex_iter().map(|v| v.point()))
+        },
         |origin, split, ordinal| FaceName {
             origin: *origin,
             split,
             ordinal,
         },
     );
+    // Face names per body, for building edge and vertex names.
+    let mut faces: Vec<Vec<FaceName>> = traced.iter().map(|_| Vec::new()).collect();
+    for (&(b, _), name) in all_faces.iter().zip(flat_faces) {
+        faces[b].push(name);
+    }
 
-    let vertex_index: HashMap<_, usize> = ent
-        .vertices
+    let edge_keys: Vec<[FaceName; 2]> = all_edges
         .iter()
-        .enumerate()
-        .map(|(i, v)| (v.id(), i))
-        .collect();
-    let edge_keys: Vec<[FaceName; 2]> = ent
-        .edge_faces
-        .iter()
-        .map(|fs| {
-            let a = fs[0];
-            let b = *fs.get(1).unwrap_or(&a);
-            let mut pair = [faces[a].clone(), faces[b].clone()];
+        .map(|&(b, e)| {
+            let fs = &traced[b].ent.edge_faces[e];
+            let first = fs[0];
+            let second = *fs.get(1).unwrap_or(&first);
+            let mut pair = [faces[b][first].clone(), faces[b][second].clone()];
             pair.sort();
             pair
         })
         .collect();
-    let edges = disambiguate(
+    let flat_edges = disambiguate(
         &edge_keys,
-        |e| {
+        |g| {
             // Faces at either end of the edge, other than its own two.
-            let own = &ent.edge_faces[e];
-            let ends = [ent.edges[e].front(), ent.edges[e].back()];
+            let (b, e) = all_edges[g];
+            let t = &traced[b];
+            let own = &t.ent.edge_faces[e];
+            let ends = [t.ent.edges[e].front(), t.ent.edges[e].back()];
             ends.iter()
-                .filter_map(|v| vertex_index.get(&v.id()))
-                .flat_map(|&i| ent.vertex_faces[i].iter().copied())
+                .filter_map(|v| t.vertex_index.get(&v.id()))
+                .flat_map(|&i| t.ent.vertex_faces[i].iter().copied())
                 .filter(|f| !own.contains(f))
-                .map(|f| face_origins[f])
+                .map(|f| t.face_origins[f])
                 .collect()
         },
-        |e| centroid([ent.edges[e].front().point(), ent.edges[e].back().point()].into_iter()),
+        |g| {
+            let (b, e) = all_edges[g];
+            let edge = &traced[b].ent.edges[e];
+            centroid([edge.front().point(), edge.back().point()].into_iter())
+        },
         |pair, ends, ordinal| EdgeName {
             faces: pair.clone(),
             ends,
@@ -167,36 +228,51 @@ pub(crate) fn name_body(solid: &Solid, origins: &FaceOrigins) -> BodyNaming {
         },
     );
 
-    let vertex_keys: Vec<Vec<FaceName>> = ent
-        .vertex_faces
+    let vertex_keys: Vec<Vec<FaceName>> = all_vertices
         .iter()
-        .map(|fs| {
-            let mut names: Vec<FaceName> = fs.iter().map(|&f| faces[f].clone()).collect();
+        .map(|&(b, v)| {
+            let fs = &traced[b].ent.vertex_faces[v];
+            let mut names: Vec<FaceName> = fs.iter().map(|&f| faces[b][f].clone()).collect();
             names.sort();
             names.truncate(MAX_NAME_LIST);
             names
         })
         .collect();
-    let vertices = disambiguate(
+    let flat_vertices = disambiguate(
         &vertex_keys,
         |_| BTreeSet::new(),
-        |v| ent.vertices[v].point(),
+        |g| {
+            let (b, v) = all_vertices[g];
+            traced[b].ent.vertices[v].point()
+        },
         |faces, _, ordinal| VertexName {
             faces: faces.clone(),
             ordinal,
         },
     );
 
-    BodyNaming {
-        faces,
-        edges,
-        vertices,
-        untraced,
-        neighbours: neighbours
-            .into_iter()
-            .map(|n| n.into_iter().collect())
-            .collect(),
+    let mut out: Vec<BodyNaming> = traced
+        .into_iter()
+        .zip(faces)
+        .map(|(t, faces)| BodyNaming {
+            faces,
+            edges: Vec::new(),
+            vertices: Vec::new(),
+            untraced: t.untraced,
+            neighbours: t
+                .neighbours
+                .into_iter()
+                .map(|n| n.into_iter().collect())
+                .collect(),
+        })
+        .collect();
+    for (&(b, _), name) in all_edges.iter().zip(flat_edges) {
+        out[b].edges.push(name);
     }
+    for (&(b, _), name) in all_vertices.iter().zip(flat_vertices) {
+        out[b].vertices.push(name);
+    }
+    out
 }
 
 /// Builds names for entities that share a `key` with others: first by the

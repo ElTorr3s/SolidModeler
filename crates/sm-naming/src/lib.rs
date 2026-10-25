@@ -24,9 +24,9 @@ pub use sm_naming_types::{
 pub use tools::{extrude_tool, revolve_tool, FaceOrigins, RevolveAxis};
 
 use sm_document::{FeatureId, PartDocument};
-use sm_kernel::{Model, RebuildError};
+use sm_kernel::{Budget, Model, RebuildError};
 use std::collections::{BTreeSet, HashMap, HashSet};
-use track::{Change, Tracker};
+use track::Tracker;
 
 /// Which kind of entity a reference points at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -105,7 +105,33 @@ impl Naming {
     /// Finds the entity a stored name refers to. To resolve many names
     /// against one model, build a [`Resolver`] once instead.
     pub fn resolve(&self, name: &TopoName) -> Resolution {
-        self.resolver().resolve(name)
+        // One pass with cheap key comparisons; no index to build.
+        let key = key_of(name);
+        let mut candidates = Vec::new();
+        for (body, naming) in self.bodies.iter().enumerate() {
+            let at = |kind, index| EntityRef { kind, body, index };
+            match name {
+                TopoName::Face(_) => candidates.extend(
+                    (0..naming.faces.len())
+                        .filter(|&i| face_key(&naming.faces[i]) == key)
+                        .map(|i| at(EntityKind::Face, i)),
+                ),
+                TopoName::Edge(_) => candidates.extend(
+                    (0..naming.edges.len())
+                        .filter(|&i| edge_key(&naming.edges[i]) == key)
+                        .map(|i| at(EntityKind::Edge, i)),
+                ),
+                TopoName::Vertex(n) => candidates.extend(
+                    (0..naming.vertices.len())
+                        .filter(|&i| {
+                            let v = &naming.vertices[i];
+                            v.faces.len() == n.faces.len() && vertex_key(v) == key
+                        })
+                        .map(|i| at(EntityKind::Vertex, i)),
+                ),
+            }
+        }
+        decide(self, name, &candidates)
     }
 
     /// An index of this naming for resolving many names.
@@ -158,6 +184,14 @@ fn edge_key(e: &EdgeName) -> Key {
     Key::Edge(pair)
 }
 
+fn key_of(name: &TopoName) -> Key {
+    match name {
+        TopoName::Face(n) => face_key(n),
+        TopoName::Edge(n) => edge_key(n),
+        TopoName::Vertex(n) => vertex_key(n),
+    }
+}
+
 fn vertex_key(v: &VertexName) -> Key {
     let mut origins: Vec<FaceOrigin> = v.faces.iter().map(|f| f.origin).collect();
     origins.sort();
@@ -174,56 +208,57 @@ pub struct Resolver<'a> {
 impl Resolver<'_> {
     /// Finds the entity a stored name refers to.
     pub fn resolve(&self, name: &TopoName) -> Resolution {
-        let key = match name {
-            TopoName::Face(n) => face_key(n),
-            TopoName::Edge(n) => edge_key(n),
-            TopoName::Vertex(n) => vertex_key(n),
-        };
-        let candidates = self.index.get(&key).map_or(&[][..], Vec::as_slice);
-        let scored: Vec<(EntityRef, Score)> = candidates
-            .iter()
-            .filter_map(|&e| {
-                let body = &self.naming.bodies[e.body];
-                let score = match name {
-                    TopoName::Face(n) => {
-                        let touching = body.neighbours.get(e.index).map(Vec::as_slice);
-                        if !still_touches(&n.split, touching) {
-                            return None;
-                        }
-                        score_face(n, &body.faces[e.index])
+        let candidates = self.index.get(&key_of(name)).map_or(&[][..], Vec::as_slice);
+        decide(self.naming, name, candidates)
+    }
+}
+
+/// Scores `candidates` (entities sharing the name's key) and picks the
+/// result.
+fn decide(naming: &Naming, name: &TopoName, candidates: &[EntityRef]) -> Resolution {
+    let scored: Vec<(EntityRef, Score)> = candidates
+        .iter()
+        .filter_map(|&e| {
+            let body = &naming.bodies[e.body];
+            let score = match name {
+                TopoName::Face(n) => {
+                    let touching = body.neighbours.get(e.index).map(Vec::as_slice);
+                    if !still_touches(&n.split, touching) {
+                        return None;
                     }
-                    TopoName::Edge(n) => score_edge(n, &body.edges[e.index]),
-                    TopoName::Vertex(n) => score_vertex(n, &body.vertices[e.index]),
-                };
-                score.map(|s| (e, s))
-            })
-            .collect();
-        let exact: Vec<EntityRef> = scored
-            .iter()
-            .map(|&(e, _)| e)
-            .filter(|&e| &self.naming.name_of(e) == name)
-            .collect();
-        match exact.as_slice() {
-            [e] => return Resolution::Exact(*e),
-            [_, _, ..] => return Resolution::Ambiguous(exact),
-            [] => {}
-        }
-        let Some(best) = scored
-            .iter()
-            .map(|&(_, s)| s)
-            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        else {
-            return Resolution::Lost;
-        };
-        let top: Vec<EntityRef> = scored
-            .iter()
-            .filter(|&&(_, s)| s == best)
-            .map(|&(e, _)| e)
-            .collect();
-        match top.as_slice() {
-            [e] => Resolution::Healed(*e),
-            _ => Resolution::Ambiguous(top),
-        }
+                    score_face(n, &body.faces[e.index])
+                }
+                TopoName::Edge(n) => score_edge(n, &body.edges[e.index]),
+                TopoName::Vertex(n) => score_vertex(n, &body.vertices[e.index]),
+            };
+            score.map(|s| (e, s))
+        })
+        .collect();
+    let exact: Vec<EntityRef> = scored
+        .iter()
+        .map(|&(e, _)| e)
+        .filter(|&e| &naming.name_of(e) == name)
+        .collect();
+    match exact.as_slice() {
+        [e] => return Resolution::Exact(*e),
+        [_, _, ..] => return Resolution::Ambiguous(exact),
+        [] => {}
+    }
+    let Some(best) = scored
+        .iter()
+        .map(|&(_, s)| s)
+        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    else {
+        return Resolution::Lost;
+    };
+    let top: Vec<EntityRef> = scored
+        .iter()
+        .filter(|&&(_, s)| s == best)
+        .map(|&(e, _)| e)
+        .collect();
+    match top.as_slice() {
+        [e] => Resolution::Healed(*e),
+        _ => Resolution::Ambiguous(top),
     }
 }
 
@@ -362,7 +397,7 @@ fn jaccard(a: &[FaceOrigin], b: &[FaceOrigin]) -> f64 {
 pub struct NamedRebuild {
     pub model: Model,
     naming: Naming,
-    changes: Vec<(FeatureId, Change)>,
+    states: Vec<(FeatureId, Vec<std::sync::Arc<track::BodyState>>)>,
     position: HashMap<FeatureId, usize>,
 }
 
@@ -374,31 +409,37 @@ impl NamedRebuild {
 
     /// Names for the model as `feature` sees it, i.e. after every feature
     /// above it. A feature's own references resolve against this. An id not
-    /// in the document gives the final names. Each call replays the change
-    /// log and names the bodies afresh, so call it once per feature.
+    /// in the document gives the final names. Each call names the bodies
+    /// afresh, so call it once per feature.
     pub fn naming_before(&self, feature: FeatureId) -> Naming {
         let Some(&limit) = self.position.get(&feature) else {
             return self.naming.clone();
         };
-        let mut bodies = Vec::new();
-        for (f, change) in &self.changes {
-            if self.position.get(f).is_none_or(|&p| p >= limit) {
-                break;
-            }
-            change.apply(&mut bodies);
-        }
-        track::naming(&bodies)
+        self.states
+            .iter()
+            .take_while(|(f, _)| self.position.get(f).is_some_and(|&p| p < limit))
+            .last()
+            .map(|(_, bodies)| track::naming(bodies))
+            .unwrap_or_default()
     }
 }
 
 /// [`sm_kernel::rebuild`], also naming every face, edge and vertex.
 pub fn rebuild_named(doc: &PartDocument) -> Result<NamedRebuild, RebuildError> {
+    rebuild_named_with(doc, &Budget::default())
+}
+
+/// [`rebuild_named`] with a caller-supplied work budget.
+pub fn rebuild_named_with(
+    doc: &PartDocument,
+    budget: &Budget,
+) -> Result<NamedRebuild, RebuildError> {
     let mut tracker = Tracker::new(doc);
-    let model = sm_kernel::rebuild_observed(doc, &mut tracker)?;
+    let model = sm_kernel::rebuild_observed_with(doc, budget, &mut tracker)?;
     Ok(NamedRebuild {
         model,
         naming: track::naming(&tracker.bodies),
-        changes: tracker.changes,
+        states: tracker.states,
         position: doc
             .features
             .iter()
