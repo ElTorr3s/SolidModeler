@@ -1,23 +1,27 @@
 //! Versions, branches and merges of a part's feature history, in the style
-//! of Onshape but stored locally inside the `.smp` file.
+//! of Onshape but stored locally.
 //!
-//! A [`History`] is a graph of [`Version`]s. Each version is a snapshot of
-//! the [`PartDocument`] (parameters and feature tree, no geometry) plus its
-//! parent versions, a message and a time. Branches and tags are names that
-//! point at versions; the head is the branch (or version) the open document
-//! was checked out from. Merges work on the feature tree, see [`merge`].
+//! A [`History`] is a graph of [`Version`]s. Each version records the
+//! [`PartDocument`] (parameters and feature tree, no geometry) as a list of
+//! content-addressed objects, plus its parent versions, a message and a
+//! time. Branches and tags are names that point at versions; the head is the
+//! branch (or version) the open document was checked out from. Merges work
+//! on the feature tree, see [`merge`].
 //!
 //! The open document itself lives outside the history (in `document.json`),
 //! so it can have uncommitted changes, like a git working tree.
 
 mod diff;
 pub mod merge;
+mod objects;
 
 pub use diff::{diff, Change};
 pub use merge::{merge3, Conflict, ConflictKey, FeatureField, MergeResult, Resolutions, Side};
+pub use objects::Hash;
 
+use objects::{Objects, ObjectsData};
 use serde::{Deserialize, Serialize};
-use sm_document::{DocumentError, PartDocument};
+use sm_document::{is_unsafe_text_char, DocumentError, Feature, FeatureId, PartDocument};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use thiserror::Error;
@@ -26,30 +30,33 @@ use thiserror::Error;
 pub const DEFAULT_BRANCH: &str = "main";
 /// Longest branch or tag name, in characters.
 pub const MAX_NAME_CHARS: usize = 100;
+/// Most versions one history may hold.
+pub const MAX_VERSIONS: usize = 100_000;
 
-/// Identifies a version: 16 hex digits hashed from its contents. It's a
-/// label, not an integrity check; uniqueness is enforced on load.
+/// Identifies a version: the BLAKE3 hash of its record (parents, message,
+/// time and the hashes of its contents).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct VersionId(String);
+pub struct VersionId(objects::Hash);
 
 impl VersionId {
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 
     /// The first 8 digits, enough to tell versions apart in a log.
     pub fn short(&self) -> &str {
-        &self.0[..self.0.len().min(8)]
+        &self.as_str()[..8]
     }
 }
 
 impl fmt::Display for VersionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        self.0.fmt(f)
     }
 }
 
+/// One recorded state of the part.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Version {
     pub id: VersionId,
@@ -59,7 +66,24 @@ pub struct Version {
     pub message: String,
     /// Seconds since the Unix epoch.
     pub time: u64,
-    pub document: PartDocument,
+    tree: Tree,
+}
+
+/// A document as object hashes: the header (the document without its
+/// features) and each feature in order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct Tree {
+    header: Hash,
+    features: Vec<Hash>,
+}
+
+/// What a version id is hashed from.
+#[derive(Serialize)]
+struct VersionRecord<'a> {
+    parents: &'a [VersionId],
+    message: &'a str,
+    time: u64,
+    tree: &'a Tree,
 }
 
 /// What the open document was checked out from.
@@ -73,6 +97,8 @@ pub enum Head {
     Version(VersionId),
 }
 
+/// Errors. Text that came from a file is shown with `{:?}`, which escapes
+/// anything that could act on a terminal.
 #[derive(Debug, Error, PartialEq)]
 pub enum HistoryError {
     #[error("no branch, tag or version called {0:?}")]
@@ -89,8 +115,8 @@ pub enum HistoryError {
     DeleteCurrentBranch,
     #[error("the two versions have no common ancestor")]
     NoCommonAncestor,
-    #[error("the merge still has conflicts or is invalid")]
-    MergeNotClean,
+    #[error("a history can hold at most {MAX_VERSIONS} versions")]
+    TooManyVersions,
     #[error("invalid history: {0}")]
     Invalid(String),
     #[error("invalid document: {0}")]
@@ -125,6 +151,10 @@ pub struct History {
     /// order and new versions only ever add lines at the end.
     versions: Vec<Version>,
     index: HashMap<VersionId, usize>,
+    objects: Objects,
+    /// Feature ids are handed out from this counter on every branch, so two
+    /// branches never give different features the same id.
+    next_feature_id: u32,
 }
 
 /// The stored form of a [`History`], validated on load.
@@ -134,7 +164,10 @@ struct HistoryData {
     branches: BTreeMap<String, VersionId>,
     #[serde(default)]
     tags: BTreeMap<String, VersionId>,
+    #[serde(default)]
+    next_feature_id: u32,
     versions: Vec<Version>,
+    objects: ObjectsData,
 }
 
 impl History {
@@ -147,8 +180,10 @@ impl History {
             tags: BTreeMap::new(),
             versions: Vec::new(),
             index: HashMap::new(),
+            objects: Objects::default(),
+            next_feature_id: 0,
         };
-        let id = history.record(Vec::new(), doc, message, time);
+        let id = history.record(Vec::new(), doc, message, time)?;
         history.branches.insert(DEFAULT_BRANCH.into(), id);
         Ok(history)
     }
@@ -188,18 +223,45 @@ impl History {
         &self.tags
     }
 
+    /// The part as recorded in version `id`. Stored versions are parsed and
+    /// validated here, when they are used, not when the history is loaded.
+    pub fn document(&self, id: &VersionId) -> Result<PartDocument, HistoryError> {
+        let version = self
+            .version(id)
+            .ok_or_else(|| HistoryError::UnknownRef(id.to_string()))?;
+        let mut doc: PartDocument = self.objects.get(&version.tree.header)?;
+        if !doc.features.is_empty() {
+            return Err(HistoryError::Invalid(format!(
+                "header of version {id} contains features"
+            )));
+        }
+        doc.features = version
+            .tree
+            .features
+            .iter()
+            .map(|h| self.objects.get::<Feature>(h))
+            .collect::<Result<_, _>>()?;
+        doc.repair_ids();
+        doc.validate()?;
+        Ok(doc)
+    }
+
+    /// The part as recorded in the head version.
+    pub fn head_document(&self) -> Result<PartDocument, HistoryError> {
+        self.document(&self.head_version().id)
+    }
+
     /// Finds a version by branch name, tag name, full id, or an id prefix of
     /// at least 4 digits that matches exactly one version, in that order.
     pub fn resolve(&self, name: &str) -> Result<VersionId, HistoryError> {
         if let Some(id) = self.branches.get(name).or_else(|| self.tags.get(name)) {
             return Ok(id.clone());
         }
-        let id = VersionId(name.into());
-        if self.index.contains_key(&id) {
-            return Ok(id);
-        }
         if name.len() >= 4 {
-            let mut matches = self.versions.iter().filter(|v| v.id.0.starts_with(name));
+            let mut matches = self
+                .versions
+                .iter()
+                .filter(|v| v.id.as_str().starts_with(name));
             if let (Some(v), None) = (matches.next(), matches.next()) {
                 return Ok(v.id.clone());
             }
@@ -215,12 +277,11 @@ impl History {
         time: u64,
     ) -> Result<VersionId, HistoryError> {
         doc.validate()?;
-        let head = self.head_version();
-        if head.document == *doc {
+        if same_content(&self.head_document()?, doc) {
             return Err(HistoryError::NoChanges);
         }
-        let parents = vec![head.id.clone()];
-        let id = self.record(parents, doc, message, time);
+        let parents = vec![self.head_version().id.clone()];
+        let id = self.record(parents, doc, message, time)?;
         self.advance_head(id.clone());
         Ok(id)
     }
@@ -262,12 +323,13 @@ impl History {
     ) -> Result<PartDocument, HistoryError> {
         self.require_clean(working)?;
         let id = self.resolve(target)?;
+        let doc = self.open(&id)?;
         self.head = if self.branches.contains_key(target) {
             Head::Branch(target.into())
         } else {
-            Head::Version(id.clone())
+            Head::Version(id)
         };
-        Ok(self.version(&id).expect("resolved").document.clone())
+        Ok(doc)
     }
 
     /// Merges `theirs` (a branch, tag or version) into the head. `working`
@@ -291,14 +353,17 @@ impl History {
             return Ok(MergeOutcome::UpToDate);
         }
         if base_id == ours_id {
-            self.advance_head(theirs_id.clone());
-            return Ok(MergeOutcome::FastForward(
-                self.version(&theirs_id).unwrap().document.clone(),
-            ));
+            let doc = self.open(&theirs_id)?;
+            self.advance_head(theirs_id);
+            return Ok(MergeOutcome::FastForward(doc));
         }
 
-        let doc = |id: &VersionId| &self.version(id).unwrap().document;
-        let result = merge3(doc(&base_id), doc(&ours_id), doc(&theirs_id), resolutions);
+        let result = merge3(
+            &self.document(&base_id)?,
+            &self.document(&ours_id)?,
+            &self.document(&theirs_id)?,
+            resolutions,
+        );
         if !result.is_clean() {
             return Ok(MergeOutcome::Conflicted(result));
         }
@@ -307,19 +372,23 @@ impl History {
             .unwrap_or("detached version")
             .to_owned();
         let message = format!("Merge {theirs} into {into}");
-        let id = self.record(vec![ours_id, theirs_id], &result.document, &message, time);
+        let id = self.record(vec![ours_id, theirs_id], &result.document, &message, time)?;
         self.advance_head(id.clone());
         Ok(MergeOutcome::Merged {
-            version: id,
-            document: result.document,
+            version: id.clone(),
+            document: self.open(&id)?,
         })
     }
 
-    /// The nearest version both `a` and `b` descend from.
+    /// The nearest version both `a` and `b` descend from. After criss-cross
+    /// merges there can be several equally near ones; the rule is to take
+    /// the one recorded last. That base is never older than necessary, so
+    /// changes already merged both ways don't come back as conflicts.
     pub fn merge_base(&self, a: &VersionId, b: &VersionId) -> Option<VersionId> {
         let of_a = self.ancestors(a);
         // Versions are in topological order, so the common ancestor with the
-        // highest index can't be an ancestor of another common ancestor.
+        // highest index can't be an ancestor of another common ancestor, and
+        // among several nearest ones it is the one recorded last.
         self.ancestors(b)
             .intersection(&of_a)
             .max()
@@ -334,14 +403,79 @@ impl History {
     }
 
     /// What changed in a version compared with its first parent.
-    pub fn changes(&self, version: &Version) -> Vec<Change> {
-        match version.parents.first().and_then(|p| self.version(p)) {
-            Some(parent) => diff(&parent.document, &version.document),
-            None => diff(
-                &PartDocument::new(version.document.name.clone(), version.document.units),
-                &version.document,
-            ),
+    pub fn changes(&self, version: &Version) -> Result<Vec<Change>, HistoryError> {
+        let doc = self.document(&version.id)?;
+        let parent = match version.parents.first() {
+            Some(p) => self.document(p)?,
+            None => PartDocument::new(doc.name.clone(), doc.units),
+        };
+        Ok(diff(&parent, &doc))
+    }
+
+    /// Rewrites every stored version through `upgrade`, which receives each
+    /// document as JSON in the form it was stored and returns it in the
+    /// current form. Used when a file from an older format version is
+    /// opened, so old versions upgrade along with the open document. Version
+    /// ids are hashes of their contents, so they change; parents, branches,
+    /// tags and the head follow.
+    pub fn migrate_documents<E: fmt::Display>(
+        &self,
+        mut upgrade: impl FnMut(serde_json::Value) -> Result<serde_json::Value, E>,
+    ) -> Result<History, HistoryError> {
+        let mut new = History {
+            head: self.head.clone(),
+            branches: BTreeMap::new(),
+            tags: BTreeMap::new(),
+            versions: Vec::new(),
+            index: HashMap::new(),
+            objects: Objects::default(),
+            next_feature_id: self.next_feature_id,
+        };
+        let mut ids: HashMap<&VersionId, VersionId> = HashMap::new();
+        for v in &self.versions {
+            let invalid = |e: &dyn fmt::Display| {
+                HistoryError::Invalid(format!("upgrading version {}: {e}", v.id))
+            };
+            let mut json: serde_json::Value = self.objects.get(&v.tree.header)?;
+            let features = v
+                .tree
+                .features
+                .iter()
+                .map(|h| self.objects.get(h))
+                .collect::<Result<Vec<serde_json::Value>, _>>()?;
+            json.as_object_mut()
+                .ok_or_else(|| invalid(&"header is not an object"))?
+                .insert("features".into(), features.into());
+            let json = upgrade(json).map_err(|e| invalid(&e))?;
+            let mut doc: PartDocument = serde_json::from_value(json).map_err(|e| invalid(&e))?;
+            doc.repair_ids();
+            doc.validate()?;
+            let parents = v.parents.iter().map(|p| ids[p].clone()).collect();
+            let id = new.record(parents, &doc, &v.message, v.time)?;
+            ids.insert(&v.id, id);
         }
+        new.branches = self
+            .branches
+            .iter()
+            .map(|(n, id)| (n.clone(), ids[id].clone()))
+            .collect();
+        new.tags = self
+            .tags
+            .iter()
+            .map(|(n, id)| (n.clone(), ids[id].clone()))
+            .collect();
+        if let Head::Version(id) = &self.head {
+            new.head = Head::Version(ids[id].clone());
+        }
+        Ok(new)
+    }
+
+    /// Opens a version for editing: its document, with the id counter raised
+    /// so new features get ids no branch has used.
+    fn open(&self, id: &VersionId) -> Result<PartDocument, HistoryError> {
+        let mut doc = self.document(id)?;
+        doc.reserve_ids(FeatureId(self.next_feature_id));
+        Ok(doc)
     }
 
     fn ancestors(&self, id: &VersionId) -> HashSet<usize> {
@@ -355,8 +489,13 @@ impl History {
         seen
     }
 
+    /// True if `working` has nothing that isn't recorded in the head version.
+    pub fn is_clean(&self, working: &PartDocument) -> Result<bool, HistoryError> {
+        Ok(same_content(&self.head_document()?, working))
+    }
+
     fn require_clean(&self, working: &PartDocument) -> Result<(), HistoryError> {
-        if self.head_version().document == *working {
+        if self.is_clean(working)? {
             Ok(())
         } else {
             Err(HistoryError::UncommittedChanges)
@@ -382,46 +521,40 @@ impl History {
         }
     }
 
-    /// Appends a version and returns its id. Documents must already be valid.
+    /// Stores a version and returns its id. Documents must already be valid.
     fn record(
         &mut self,
         parents: Vec<VersionId>,
         doc: &PartDocument,
         message: &str,
         time: u64,
-    ) -> VersionId {
-        let mut version = Version {
-            id: VersionId(String::new()),
-            parents,
-            message: message.into(),
-            time,
-            document: doc.clone(),
+    ) -> Result<VersionId, HistoryError> {
+        let mut header = doc.clone();
+        let features = std::mem::take(&mut header.features);
+        let tree = Tree {
+            header: self.objects.put(&header)?,
+            features: features
+                .iter()
+                .map(|f| self.objects.put(f))
+                .collect::<Result<_, _>>()?,
         };
-        let content = serde_json::to_vec(&version).expect("serializable");
-        // A clash with a different version is astronomically unlikely, but
-        // costs nothing to rule out.
-        let mut salt = 0u64;
-        loop {
-            let id = VersionId(fnv1a(&[&content, &salt.to_le_bytes()]));
-            match self.version(&id) {
-                None => {
-                    version.id = id.clone();
-                    self.index.insert(id.clone(), self.versions.len());
-                    self.versions.push(version);
-                    return id;
-                }
-                // Recording exactly the same version twice is a no-op.
-                Some(v)
-                    if v.parents == version.parents
-                        && v.document == version.document
-                        && v.message == version.message
-                        && v.time == version.time =>
-                {
-                    return id;
-                }
-                Some(_) => salt += 1,
+        let id = record_id(&parents, message, time, &tree);
+        self.next_feature_id = self.next_feature_id.max(doc.next_id().0);
+        // The same record twice is the same version.
+        if !self.index.contains_key(&id) {
+            if self.versions.len() >= MAX_VERSIONS {
+                return Err(HistoryError::TooManyVersions);
             }
+            self.index.insert(id.clone(), self.versions.len());
+            self.versions.push(Version {
+                id: id.clone(),
+                parents,
+                message: message.into(),
+                time,
+                tree,
+            });
         }
+        Ok(id)
     }
 }
 
@@ -430,16 +563,15 @@ impl TryFrom<HistoryData> for History {
 
     fn try_from(data: HistoryData) -> Result<Self, HistoryError> {
         let invalid = |msg: String| HistoryError::Invalid(msg);
+        if data.versions.is_empty() {
+            return Err(invalid("no versions".into()));
+        }
+        if data.versions.len() > MAX_VERSIONS {
+            return Err(HistoryError::TooManyVersions);
+        }
+        let objects = Objects::from_data(data.objects)?;
         let mut index = HashMap::with_capacity(data.versions.len());
-        let mut versions = data.versions;
-        for (i, v) in versions.iter_mut().enumerate() {
-            // Ids are shown in logs, so only plain characters are allowed.
-            if v.id.0.is_empty()
-                || v.id.0.len() > 64
-                || !v.id.0.bytes().all(|b| b.is_ascii_alphanumeric())
-            {
-                return Err(invalid(format!("bad version id {:?}", v.id.0)));
-            }
+        for (i, v) in data.versions.iter().enumerate() {
             // Parents must come earlier, which also rules out cycles.
             if let Some(p) = v.parents.iter().find(|p| !index.contains_key(*p)) {
                 return Err(invalid(format!(
@@ -447,14 +579,22 @@ impl TryFrom<HistoryData> for History {
                     v.id
                 )));
             }
+            if v.id != record_id(&v.parents, &v.message, v.time, &v.tree) {
+                return Err(invalid(format!("version {} does not match its hash", v.id)));
+            }
             if index.insert(v.id.clone(), i).is_some() {
                 return Err(invalid(format!("version id {} is used twice", v.id)));
             }
-            v.document.repair_ids();
-            v.document.validate()?;
-        }
-        if versions.is_empty() {
-            return Err(invalid("no versions".into()));
+            // Contents are parsed when used, but must all be present.
+            if let Some(h) = std::iter::once(&v.tree.header)
+                .chain(&v.tree.features)
+                .find(|h| !objects.contains(h))
+            {
+                return Err(invalid(format!(
+                    "version {} needs missing object {h}",
+                    v.id
+                )));
+            }
         }
         for (name, id) in data.branches.iter().chain(&data.tags) {
             if !valid_name(name) {
@@ -476,13 +616,19 @@ impl TryFrom<HistoryData> for History {
             }
             _ => {}
         }
-        Ok(History {
+        let history = History {
             head: data.head,
             branches: data.branches,
             tags: data.tags,
-            versions,
+            versions: data.versions,
             index,
-        })
+            objects,
+            next_feature_id: data.next_feature_id,
+        };
+        // The open document is compared with the head on every checkout, so
+        // a broken head is reported now rather than on first use.
+        history.head_document()?;
+        Ok(history)
     }
 }
 
@@ -492,27 +638,42 @@ impl From<History> for HistoryData {
             head: h.head,
             branches: h.branches,
             tags: h.tags,
+            next_feature_id: h.next_feature_id,
             versions: h.versions,
+            objects: h.objects.to_data(),
         }
     }
 }
 
-/// Branch and tag names: printable, no surrounding spaces, not too long.
+/// A version's id: the hash of everything recorded about it.
+fn record_id(parents: &[VersionId], message: &str, time: u64, tree: &Tree) -> VersionId {
+    let record = VersionRecord {
+        parents,
+        message,
+        time,
+        tree,
+    };
+    let text = serde_json::to_string(&record).expect("serializable");
+    VersionId(Hash::of(text.as_bytes()))
+}
+
+/// Equal as far as the user can tell: everything except the internal id
+/// counter, so adding and then deleting a feature leaves nothing to record.
+fn same_content(a: &PartDocument, b: &PartDocument) -> bool {
+    a.name == b.name
+        && a.units == b.units
+        && a.parameters == b.parameters
+        && a.features == b.features
+        && a.end_of_part == b.end_of_part
+}
+
+/// Branch and tag names: no control or invisible characters, no surrounding
+/// spaces, not too long.
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.trim() == name
         && name.chars().count() <= MAX_NAME_CHARS
-        && !name.chars().any(char::is_control)
-}
-
-fn fnv1a(parts: &[&[u8]]) -> String {
-    let hash = parts
-        .iter()
-        .flat_map(|p| p.iter())
-        .fold(0xcbf29ce484222325u64, |h, b| {
-            (h ^ *b as u64).wrapping_mul(0x100000001b3)
-        });
-    format!("{hash:016x}")
+        && !name.chars().any(is_unsafe_text_char)
 }
 
 /// The current time in seconds since the Unix epoch.

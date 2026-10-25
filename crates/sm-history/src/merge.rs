@@ -12,6 +12,8 @@ use sm_document::{DocumentError, Feature, FeatureId, PartDocument};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
+use crate::Change;
+
 /// Which side of a merge to take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -127,15 +129,39 @@ pub fn merge3(
         &ours.name,
         &theirs.name,
     );
-    let units = m.pick(ConflictKey::Units, &base.units, &ours.units, &theirs.units);
+    // Values are stored in the document's unit, so a unit change on one
+    // side reinterprets every number the other side entered. That needs a
+    // person to decide, even though the unit itself merges cleanly.
+    let units = if (ours.units != base.units
+        && theirs.units == base.units
+        && values_changed(base, &theirs))
+        || (theirs.units != base.units && ours.units == base.units && values_changed(base, ours))
+    {
+        m.conflict(
+            ConflictKey::Units,
+            Some(&base.units),
+            Some(&ours.units),
+            Some(&theirs.units),
+            &ours.units,
+            &theirs.units,
+        )
+    } else {
+        m.pick(ConflictKey::Units, &base.units, &ours.units, &theirs.units)
+    };
     let parameters = m.parameters(base, ours, &theirs);
     let features = m.features(base, ours, &theirs);
-    let end_of_part = m.pick(
-        ConflictKey::EndOfPart,
-        &base.end_of_part,
-        &ours.end_of_part,
-        &theirs.end_of_part,
-    );
+    // A pick for the marker applies even when the marker itself merged
+    // cleanly, since it can also settle the rollback check below.
+    let end_of_part = match resolutions.get(&ConflictKey::EndOfPart) {
+        Some(Side::Ours) => ours.end_of_part,
+        Some(Side::Theirs) => theirs.end_of_part,
+        None => m.pick(
+            ConflictKey::EndOfPart,
+            &base.end_of_part,
+            &ours.end_of_part,
+            &theirs.end_of_part,
+        ),
+    };
 
     // Start from ours so private bookkeeping (the id counter) carries over,
     // then make sure the counter is above every id either side has used.
@@ -144,8 +170,24 @@ pub fn merge3(
     document.units = units;
     document.parameters = parameters;
     document.features = features;
-    document.end_of_part = end_of_part;
+    document.end_of_part =
+        end_of_part.and_then(|id| reanchor(id, &document, [ours, &theirs, base]));
     document.repair_ids();
+    if !resolutions.contains_key(&ConflictKey::EndOfPart)
+        && !m.conflicts.iter().any(|c| c.key == ConflictKey::EndOfPart)
+        && (rolls_back_new(base, ours, &document) || rolls_back_new(base, &theirs, &document))
+    {
+        // Picking a side here keeps the marker as merged (ours) or takes
+        // theirs; either way someone has seen it.
+        m.conflict(
+            ConflictKey::EndOfPart,
+            Some(&base.end_of_part),
+            Some(&ours.end_of_part),
+            Some(&theirs.end_of_part),
+            &(),
+            &(),
+        );
+    }
     let invalid = document.validate().err();
 
     MergeResult {
@@ -154,6 +196,54 @@ pub fn merge3(
         renumbered,
         invalid,
     }
+}
+
+/// True if `side` changed any number relative to `base`: a parameter value,
+/// a feature definition, or a new feature.
+fn values_changed(base: &PartDocument, side: &PartDocument) -> bool {
+    crate::diff(base, side).iter().any(|c| match c {
+        Change::ParameterAdded(_) | Change::ParameterChanged(_) | Change::FeatureAdded { .. } => {
+            true
+        }
+        Change::FeatureChanged { fields, .. } => fields.contains(&"definition"),
+        _ => false,
+    })
+}
+
+/// True if a feature `side` added was active there (above its end-of-part
+/// marker) but ends up rolled back in `merged`, which would silently drop it
+/// from the part.
+fn rolls_back_new(base: &PartDocument, side: &PartDocument, merged: &PartDocument) -> bool {
+    let above_marker = |doc: &PartDocument| -> HashSet<FeatureId> {
+        let end = doc
+            .end_of_part
+            .and_then(|id| doc.features.iter().position(|f| f.id == id))
+            .unwrap_or(doc.features.len());
+        doc.features[..end].iter().map(|f| f.id).collect()
+    };
+    let (active_there, active_here) = (above_marker(side), above_marker(merged));
+    side.features.iter().any(|f| {
+        base.feature(f.id).is_none()
+            && active_there.contains(&f.id)
+            && merged.feature(f.id).is_some()
+            && !active_here.contains(&f.id)
+    })
+}
+
+/// The end-of-part marker is stored as the feature below it. If the merge
+/// deleted that feature, the marker moves down to the next feature that
+/// survived (as it would when deleting the feature in the editor), or to the
+/// end of the part. `sides` are searched in order for where `id` was.
+fn reanchor(id: FeatureId, merged: &PartDocument, sides: [&PartDocument; 3]) -> Option<FeatureId> {
+    if merged.feature(id).is_some() {
+        return Some(id);
+    }
+    let side = sides.into_iter().find(|d| d.feature(id).is_some())?;
+    side.features
+        .iter()
+        .skip_while(|f| f.id != id)
+        .map(|f| f.id)
+        .find(|f| merged.feature(*f).is_some())
 }
 
 struct Merger<'a> {
@@ -414,8 +504,13 @@ fn renumber_colliding(
             // Both added exactly the same feature: treat it as one.
             Some(o) if o == t => {}
             Some(_) => {
+                // Out of ids: leave the clash, which validation then reports
+                // as a duplicate id instead of a panic.
+                let Some(after) = next.checked_add(1) else {
+                    break;
+                };
                 let new = FeatureId(next);
-                next = next.checked_add(1).expect("feature ids exhausted");
+                next = after;
                 map.insert(t.id, new);
                 renumbered.push((t.id, new));
             }

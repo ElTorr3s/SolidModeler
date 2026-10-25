@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sm_document::PartDocument;
 use sm_history::History;
 use std::fs::File;
-use std::io::{BufWriter, Read, Seek, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use thiserror::Error;
 use zip::write::SimpleFileOptions;
@@ -63,7 +63,19 @@ pub enum FormatError {
     BadVersion(u32),
     #[error("invalid document: {0}")]
     Invalid(#[from] sm_document::DocumentError),
+    #[error("{0} expands more than {MAX_EXPANSION} times its compressed size")]
+    Expands(&'static str),
+    #[error("the file has a version history; saving without it would delete every version")]
+    WouldDropHistory,
+    #[error("upgrading the version history: {0}")]
+    History(#[from] sm_history::HistoryError),
 }
+
+/// Largest ratio between an entry's text and the whole archive accepted for
+/// the history, beyond a 1 MiB allowance. Real histories compress far less
+/// (their objects are already deduplicated); a bigger ratio means a file
+/// built to expand.
+pub const MAX_EXPANSION: u64 = 100;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -101,12 +113,18 @@ pub fn save(path: &Path, doc: &PartDocument, cached_step: Option<&str>) -> Resul
 }
 
 /// [`save`], also storing the part's version history.
+///
+/// Refuses to save without a history over a file that has one, so callers
+/// that don't know about versions can't delete them.
 pub fn save_with_history(
     path: &Path,
     doc: &PartDocument,
     history: Option<&History>,
     cached_step: Option<&str>,
 ) -> Result<(), FormatError> {
+    if history.is_none() && has_history(path) {
+        return Err(FormatError::WouldDropHistory);
+    }
     let dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -130,6 +148,14 @@ pub fn save_with_history(
     #[cfg(unix)]
     File::open(dir)?.sync_all()?;
     Ok(())
+}
+
+/// True if `path` is a readable archive with a history entry.
+fn has_history(path: &Path) -> bool {
+    File::open(path)
+        .ok()
+        .and_then(|f| zip::ZipArchive::new(f).ok())
+        .is_some_and(|zip| zip.index_for_name(HISTORY).is_some())
 }
 
 pub fn open(path: &Path) -> Result<SmpFile, FormatError> {
@@ -159,6 +185,30 @@ pub fn write_with_history<W: Write + Seek>(
         file: DOCUMENT,
         source,
     })?;
+    // Never write what `read` would refuse.
+    if document.len() as u64 > MAX_DOCUMENT_BYTES {
+        return Err(FormatError::TooLarge {
+            file: DOCUMENT,
+            limit: MAX_DOCUMENT_BYTES,
+        });
+    }
+    let history = history
+        .map(|h| {
+            // Pretty-printed so versions diff line by line. Objects stay
+            // compact on one line each, exactly as hashed.
+            let json = serde_json::to_vec_pretty(h).map_err(|source| FormatError::Json {
+                file: HISTORY,
+                source,
+            })?;
+            if json.len() as u64 > MAX_HISTORY_BYTES {
+                return Err(FormatError::TooLarge {
+                    file: HISTORY,
+                    limit: MAX_HISTORY_BYTES,
+                });
+            }
+            Ok(json)
+        })
+        .transpose()?;
     let manifest = Manifest {
         format: FORMAT_ID.into(),
         version: FORMAT_VERSION,
@@ -178,12 +228,7 @@ pub fn write_with_history<W: Write + Seek>(
     zip.write_all(&manifest)?;
     zip.start_file(DOCUMENT, options)?;
     zip.write_all(&document)?;
-    if let Some(history) = history {
-        // Pretty-printed so a version of the history diffs line by line.
-        let json = serde_json::to_vec_pretty(history).map_err(|source| FormatError::Json {
-            file: HISTORY,
-            source,
-        })?;
+    if let Some(json) = history {
         zip.start_file(HISTORY, options)?;
         zip.write_all(&json)?;
     }
@@ -195,7 +240,9 @@ pub fn write_with_history<W: Write + Seek>(
     Ok(())
 }
 
-pub fn read<R: Read + Seek>(input: R) -> Result<SmpFile, FormatError> {
+pub fn read<R: Read + Seek>(mut input: R) -> Result<SmpFile, FormatError> {
+    let archive_len = input.seek(SeekFrom::End(0))?;
+    input.seek(SeekFrom::Start(0))?;
     let mut zip = zip::ZipArchive::new(input)?;
     let manifest: Manifest =
         serde_json::from_slice(&read_entry(&mut zip, MANIFEST, MAX_MANIFEST_BYTES)?).map_err(
@@ -234,13 +281,25 @@ pub fn read<R: Read + Seek>(input: R) -> Result<SmpFile, FormatError> {
     let history = match zip.index_for_name(HISTORY) {
         None => None,
         Some(_) => {
-            let bytes = read_entry(&mut zip, HISTORY, MAX_HISTORY_BYTES)?;
-            Some(
+            let limit =
+                MAX_HISTORY_BYTES.min((1 << 20) + archive_len.saturating_mul(MAX_EXPANSION));
+            let bytes = read_entry(&mut zip, HISTORY, limit).map_err(|e| match e {
+                FormatError::TooLarge { limit: l, .. } if l < MAX_HISTORY_BYTES => {
+                    FormatError::Expands(HISTORY)
+                }
+                e => e,
+            })?;
+            let history: History =
                 serde_json::from_slice(&bytes).map_err(|source| FormatError::Json {
                     file: HISTORY,
                     source,
-                })?,
-            )
+                })?;
+            // Stored versions upgrade along with the open document.
+            Some(if manifest.version == FORMAT_VERSION {
+                history
+            } else {
+                history.migrate_documents(|json| migrate(manifest.version, json))?
+            })
         }
     };
 
@@ -518,6 +577,46 @@ mod tests {
             result,
             Err(FormatError::Json { file: HISTORY, .. })
         ));
+    }
+
+    #[test]
+    fn history_that_expands_too_much_is_rejected() {
+        let mut buf = to_bytes(&part(), None);
+        let manifest = entry(&mut buf, MANIFEST);
+        let document = entry(&mut buf, DOCUMENT);
+        // 4 MiB of spaces compresses to a few KiB: far above the ratio.
+        let bomb = vec![b' '; 4 << 20];
+        let result = read(archive(&[
+            (MANIFEST, &manifest),
+            (DOCUMENT, &document),
+            (HISTORY, &bomb),
+        ]));
+        assert!(
+            matches!(result, Err(FormatError::Expands(HISTORY))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn saving_without_history_never_drops_versions() {
+        let dir = std::env::temp_dir().join(format!("smp-hist-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("part.smp");
+        let doc = part();
+        let history = History::new(&doc, "Initial", 1).unwrap();
+        save_with_history(&path, &doc, Some(&history), None).unwrap();
+
+        assert!(matches!(
+            save(&path, &doc, None),
+            Err(FormatError::WouldDropHistory)
+        ));
+        assert_eq!(open(&path).unwrap().history, Some(history.clone()));
+        // Saving with the history is fine, and so is a file without one.
+        save_with_history(&path, &doc, Some(&history), None).unwrap();
+        let other = dir.join("plain.smp");
+        save(&other, &doc, None).unwrap();
+        save(&other, &doc, None).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

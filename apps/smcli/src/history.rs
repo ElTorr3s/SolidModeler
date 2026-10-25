@@ -11,7 +11,7 @@
 //! `smcli set-distance <in.smp> <feature> <value>`
 //!                                            edit an extrusion, to try merges
 
-use crate::Result;
+use crate::{printable, Result};
 use sm_document::{ExtrudeExtent, FeatureKind};
 use sm_format::SmpFile;
 use sm_history::{History, MergeOutcome, Resolutions, Side};
@@ -95,7 +95,7 @@ fn log(path: &str) -> Result<()> {
         Some(b) => println!("on branch {}", printable(b)),
         None => println!("on version {}", h.head_version().id.short()),
     }
-    if h.head_version().document != file.document {
+    if !h.is_clean(&file.document)? {
         println!("(the open part has changes not recorded as a version)");
     }
     let labels = |id| {
@@ -125,7 +125,7 @@ fn log(path: &str) -> Result<()> {
                 parents.join(", ")
             }
         );
-        for change in h.changes(v) {
+        for change in h.changes(v)? {
             println!("    {}", printable(&change.to_string()));
         }
     }
@@ -198,14 +198,6 @@ fn merge(path: &str, target: &str, side: Option<Side>) -> Result<()> {
         }
         Ok(())
     })
-}
-
-/// Replaces control characters, so names and messages from a file can't
-/// send escape sequences to the terminal.
-fn printable(text: &str) -> String {
-    text.chars()
-        .map(|c| if c.is_control() { '\u{fffd}' } else { c })
-        .collect()
 }
 
 fn set_distance(path: &str, feature: &str, value: &str) -> Result<()> {
@@ -358,10 +350,5 @@ mod tests {
         // Saving re-validates, so a non-finite distance never reaches disk.
         assert!(s.run(&["set-distance", "Extrusion1", "inf"]).is_err());
         assert_eq!(s.distance(), 10.0);
-    }
-
-    #[test]
-    fn printable_strips_control_characters() {
-        assert_eq!(printable("a\u{1b}[31mb\n"), "a\u{fffd}[31mb\u{fffd}");
     }
 }

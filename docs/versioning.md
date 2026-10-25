@@ -6,32 +6,38 @@ document covers the version history of a part (implemented in the
 `sm-history` crate) and the plan for growing it into a local document and
 project manager for parts and assemblies.
 
-Every choice marked **Reversible** below was picked because it is the easiest
-to change later. Choices that change the `.smp` format or the product's
-direction are listed under [Decisions for the owner](#decisions-for-the-owner).
+The direction was settled overnight on 2026-10-24 (ballot 1, recorded in
+`docs/decisions.md` in PR #7, decided by the design-decisions thread under the owner's
+delegation): the working format becomes a local **project store**, and `.smp`
+becomes the single-document package. This PR is the first layer: the version
+graph, branches, tags and the feature-level merge, stored today in the `.smp`
+package. The same engine moves onto the project store next (see
+[Toward a local Onshape-style document manager](#toward-a-local-onshape-style-document-manager)).
 
 ## How it works today
 
-### Versions are snapshots of the feature tree
+### Versions are content-addressed snapshots
 
 A part's history is a graph of versions. Each version holds:
 
-- a full snapshot of the `PartDocument`: parameters, features, end-of-part
-  marker. No geometry; geometry is always rebuilt from the feature tree.
+- the `PartDocument` as a list of object hashes: one for the header (name,
+  units, parameters, end-of-part marker) and one per feature, in order. No
+  geometry; geometry is always rebuilt from the feature tree.
 - its parents: none for the first version, one for an ordinary version, two
   for a merge (ours first).
 - a message and a time (seconds since the Unix epoch).
-- an id: 16 hex digits hashed from the above. It is a label, not a security
-  check. Ids must be unique and parents must appear earlier in the file,
-  which is checked on load and also rules out cycles.
+- an id: the BLAKE3 hash of all of the above (64 hex digits; `smcli log`
+  shows the first 8).
 
-**Reversible:** versions store snapshots rather than an operation log. The
-change list for any version ("changed Extrusion2 (definition)", "added
-Fillet1") is computed by `sm_history::diff` between a version and its
-parent, so nothing is lost. Going from snapshots to an operation log later is
-a mechanical conversion; the other way round depends on the operations'
-exact semantics never changing. Snapshots cost space (see
-[Size](#size)).
+Objects are stored once, named by the BLAKE3 hash of their canonical JSON
+(compact, keys sorted). A version that changes one extrusion depth adds one
+small object; the header and every other feature are shared with its parent.
+This is git's tree structure, and the project store uses the same objects.
+
+Every snapshot is the whole truth for its version. Change lists ("changed
+Extrusion2 (definition)", "added Fillet1") are computed by `sm_history::diff`
+between a version and its parent. The project store adds a microversion log
+on top for undo and audit, but nothing is ever rebuilt from that log.
 
 ### Branches, tags and the head
 
@@ -44,25 +50,29 @@ exact semantics never changing. Snapshots cost space (see
   a specific version (when a tag or an old version is checked out). Versions
   recorded on a detached version are kept, and a branch can be created at
   them to keep working there.
-- Names may contain any printable characters (so `Révision B` works), up to
-  100 characters, with no leading or trailing spaces. A name can't be both a
-  branch and a tag.
-- A target is resolved as a branch name, then a tag name, then a full
-  version id, then an id prefix of at least 4 digits that matches exactly
-  one version.
+- Names may contain letters in any script (so `Révision B` works), up to
+  100 characters, with no leading or trailing spaces, and no control or
+  invisible format characters (such as the bidirectional overrides that can
+  make `main\u{202e}` look like `main`). A name can't be both a branch and a
+  tag.
+- A target is resolved as a branch name, then a tag name, then a version id
+  or an id prefix of at least 4 digits that matches exactly one version.
 
 ### The open document and uncommitted changes
 
 The open part (`document.json`) is separate from the history, like a git
 working tree. It can differ from the head version; `smcli log` says so.
 Checkout and merge refuse to run while it has unrecorded changes, so work is
-never silently thrown away.
+never silently thrown away. Only what the user can see counts as a change:
+adding a feature and deleting it again leaves nothing to record.
 
 ### Merging
 
-Merging is three-way, at the feature level: the merge base is the newest
+Merging is three-way, at the feature level: the merge base is the nearest
 version both sides descend from, and each side's changes since then are
-combined.
+combined. After criss-cross merges (each branch merged into the other) there
+can be several equally near ones; the one recorded last is used, which is
+never older than necessary.
 
 - **Features** are matched by their stable id. Each feature merges field by
   field: name, suppressed, and definition (sketch geometry, extrude extent,
@@ -70,21 +80,36 @@ combined.
   other merges cleanly.
 - **Parameters** are matched by name and merge as a whole (value and comment).
   A renamed parameter is a deletion plus an addition.
-- **Part name, units and the end-of-part marker** merge as single values.
+- **Part name and units** merge as single values. Values are stored in the
+  document's unit today, so a unit change on one side and any changed or new
+  number on the other is a conflict, even though the unit itself merged
+  cleanly. (Decision D3 moves stored geometry to millimetres, after which a
+  unit change is display-only and this conflict goes away.)
+- **The end-of-part marker** merges as a single value. It is stored as the
+  feature below it and moves with that feature. If the merge deletes that
+  feature, the marker moves down to the next surviving feature, or to the end
+  of the part. If the merged marker would roll back a feature one side added
+  while it was active there, that is a conflict, so new work never silently
+  disappears below the marker.
 - **Order:** if only one side reordered the features both sides share, its
   order wins. Features only one side has are placed after the feature they
   followed on that side. When both sides added features at the same place,
   the side whose order was used comes first (ours, unless only they
   reordered).
-- **New features with the same id:** ids are handed out per document, so two
-  branches that each add a feature usually give it the same id. Their side's
-  feature gets a fresh id, and every reference to it on their side (and their
-  end-of-part marker) is rewritten. The merge result lists every renumbering.
-  Two identical additions count as one.
+- **Feature ids across branches:** every branch of a history hands out
+  feature ids from one shared counter (the history raises the open
+  document's counter on checkout and merge), so two branches never give
+  different features the same id, and merging the same branch again later
+  stays correct. A part edited outside its history (for example two copies of
+  a file) can still collide; then their side's feature gets a fresh id and
+  their references are rewritten, and the result lists every renumbering.
+  Decision D1 replaces counter ids with random UUIDv7 ids, after which
+  renumbering is removed entirely. Two identical additions count as one.
 
 A **conflict** is a value changed differently on both sides, a feature
-deleted on one side and changed on the other, or both sides reordering
-differently. The merge keeps our side for each conflict and reports it with
+deleted on one side and changed on the other, both sides reordering
+differently, a unit change against value edits, or a marker that would roll
+back new work. The merge keeps our side for each conflict and reports it with
 the base, ours and theirs values. Nothing is recorded until every conflict is
 settled: the caller passes a pick (ours or theirs) per conflict and merges
 again. `smcli merge <file> <branch> theirs` settles all of them one way.
@@ -103,32 +128,50 @@ extrude option) can be added without changing the stored format.
 
 ### Storage in `.smp`
 
-The history is an optional `history.json` entry in the `.smp` zip,
-pretty-printed JSON:
+The history is an optional `history.json` entry in the `.smp` zip:
 
 ```json
 {
   "head": { "branch": "main" },
-  "branches": { "main": "6759db85d1f0a3b2", "deeper-pocket": "cc96e9170a4e6b81" },
-  "tags": { "Rev A": "8e0327a3c5d2e190" },
+  "branches": { "main": "6759db85…", "deeper-pocket": "cc96e917…" },
+  "tags": { "Rev A": "8e0327a3…" },
+  "next_feature_id": 7,
   "versions": [
-    { "id": "8e0327a3c5d2e190", "parents": [], "message": "Initial",
-      "time": 1792885200, "document": { "name": "Block", "...": "..." } }
-  ]
+    { "id": "8e0327a3…", "parents": [], "message": "Initial", "time": 1792885200,
+      "tree": { "header": "41c2…", "features": ["9a0e…", "77b1…"] } }
+  ],
+  "objects": {
+    "41c2…": {"end_of_part":null,"features":[],"name":"Block","next_id":7,…},
+    "9a0e…": {"id":1,"kind":{…},"name":"Sketch1","suppressed":false}
+  }
 }
 ```
 
 - The version list is append-only and in parent-before-child order, so a new
-  version only adds lines at the end of the file.
+  version only adds lines at the end of the list. Each object is one line.
+- **Lazy loading:** opening a file checks the structure and hashes but parses
+  only the head version's document. Other versions are parsed and validated
+  when they are used (checkout, merge, log).
+- **Verified on load:** every object must hash to its name and every version
+  id to its record, so nothing in the file can stand in for something else.
+  Version ids, parents, branches and tags must exist and parents must come
+  earlier in the list (which also rules out cycles). Objects are kept byte
+  for byte as written, so reformatting `history.json` by hand invalidates it.
+- **Limits:** at most 100,000 versions and 64 MiB of history text. The limit
+  is enforced when saving too, so a part never becomes too large to reopen.
+  When reading, the history may expand to at most 100 times the size of the
+  whole file (beyond a 1 MiB allowance), which stops small files built to
+  expand.
 - A file without `history.json` is a part with no versions yet. `smcli commit`
   starts one.
 - A damaged history is an error when opening, not silently dropped, because
-  saving the file again would otherwise throw away every version.
-- Size limit: 256 MiB uncompressed, enforced while decompressing like the
-  other entries. Every stored document is validated on load.
-
-**Reversible:** adding an optional entry doesn't change `document.json`, so
-the format version stays 1 and files without history are unaffected.
+  saving the file again would otherwise throw away every version. For the
+  same reason, saving without a history over a file that has one is refused.
+- **Upgrades:** when a file from an older format version is opened, every
+  stored version is upgraded along with the open document, not only the
+  head. Their ids are hashes, so they change, and parents, branches, tags and
+  the head follow. (The project store instead records each object's schema
+  version and upgrades on read, never rewriting objects in place.)
 
 ### Try it
 
@@ -145,76 +188,72 @@ smcli merge part.smp deeper-pocket      # clean: different features changed
 smcli log part.smp
 ```
 
-## Size
-
-Every version stores the whole feature tree. Feature trees are small (a
-complex part is a few hundred KB of JSON) and the zip compresses repeated
-snapshots well, so hundreds of versions are fine. For thousands, the planned
-fix is content-addressed storage: each feature and parameter stored once by
-hash, and versions listing hashes. That changes `history.json` only, and is
-the same structure as a git tree, which keeps the git option below open.
-
 ## Toward a local Onshape-style document manager
 
 Onshape's file management, without the server: everything lives in local
 files and folders that the user owns, backs up and syncs however they like.
+The design below follows ballot 1 and ADR 4 in `docs/decisions.md`.
 
-### Projects
+### The project store
 
-A project is a folder with a small `project.json` (name, settings, the list
-of documents) next to its `.smp` parts and, later, `.sma` assemblies. This
-is Inventor's project file, made simple. Opening a project indexes its
-documents.
+A project is a folder (Inventor's project, Onshape's document set) with:
 
-### Versions across documents
+- a project file naming the project and its settings (the role of Inventor's
+  `.ipj`);
+- an object store: the same canonical JSON objects as above, named by their
+  BLAKE3 hash and written once (temp file, fsync, rename). Object ids are
+  checked as exact-length lowercase hex before they become paths, every
+  object is re-hashed when read, and objects, log records and the project as
+  a whole have size limits;
+- refs (branches, versions, releases) as the only mutable state, updated
+  atomically under a lock;
+- an append-only microversion log of edits, for undo and audit.
 
-- **Per-document history** (today): each part carries its own versions,
-  branches and tags, so a single file can be emailed with its history.
-- **Project versions and releases** (next): a project-level tag records one
-  version of every document at once, so `Release 3` means a consistent set of
-  parts and assemblies. A release can carry a state (work in progress, in
-  review, released, obsolete) and released versions are read-only, as in
-  Onshape's release management and Inventor's Vault lifecycle states.
-- **Branches across documents:** a project branch is a branch of the same
-  name in each document it touches, so an engineering change can span parts
-  and assemblies and merge back together.
+`.smp` (part), `.sma` (assembly) and `.smd` (drawing) become single-document
+packages for exchange and Pack and Go, optionally carrying that document's
+history in the `history.json` above. Opening a loose `.smp` still works and
+opens it as a one-document project.
+
+### Versions, branches and releases across documents
+
+- A project branch spans every document in the project, so an engineering
+  change can touch parts and assemblies and merge back as one.
+- Named versions are immutable. Releases have the states Work in progress,
+  In review, Released and Obsolete. Released versions are read-only forever
+  (their hashes enforce it); branching from a release is allowed and is how
+  an engineering change starts. Locally, the user can release.
 
 ### References and where-used
 
-Assemblies (and derived parts) refer to a part by document id plus a version
-selector: a branch (follows the latest), a tag, or a fixed version id. The
-project index keeps a reverse map, which answers where-used ("which
-assemblies use this bracket, and at which version") and shows which
-assemblies need updating when a part moves forward, like Onshape's
-"update to latest" and Inventor's where-used in Vault. Inside a part, stable
-references to faces and edges depend on the topological naming work (see
-below).
+References inside a project are live on the current branch; references to
+other projects pin a version. A where-used and search index (SQLite) may be
+kept as a cache rebuilt from the objects, never as the source of truth.
 
 ### History browsing
 
-The GUI's version manager shows the version graph with branches and tags,
-the change list for each version, side-by-side comparison of two versions
-(feature tree diff now, geometry diff later), restore of an old version as a
-new one, and a merge dialog that lists each conflict with base, ours and
-theirs values.
+The GUI's version manager shows the version graph with branches, versions
+and releases, the change list for each version, side-by-side comparison of
+two versions (feature tree diff now, geometry diff later), restore of an old
+version as a new one, and a merge dialog that lists each conflict with base,
+ours and theirs values.
 
-### Optional git compatibility
+### Git
 
-Because the feature tree is plain JSON, a project could also be a git
-repository, with the documents' JSON committed directly instead of zipped.
-This is optional: the built-in history needs no git. Whether to offer it is
-a decision for the owner (below).
+The layout is plain canonical JSON and the export is deterministic, so a
+project can be put in git by the user. The app never needs git and never runs
+it on a project folder, because a hostile `.git/config` can run code.
 
 ## Interaction with topological naming
 
 Today features refer to each other only by feature id (an extrusion names
-its sketch), and merges rewrite those references when they renumber
-features (`FeatureKind::remap_references`). When features start referring to
-faces and edges, two things must hold for merges to stay correct:
+its sketch), and the rare merge that renumbers a feature rewrites those
+references (`FeatureKind::remap_references`). When features start referring
+to faces and edges, two things must hold for merges to stay correct:
 
-1. Persistent face and edge names must be built from feature ids and the
-   sketch entities that created them, so renumbering a feature can rewrite
-   them with the same id map, and `remap_references` must cover them.
+1. Persistent face and edge names are built from feature ids and sketch
+   entity ids (the naming thread's `TopoName::remap_features`), so any
+   renumbering rewrites them with the same id map. With UUIDv7 ids (D1) no
+   renumbering happens at all.
 2. A merged document must be rebuilt before it is trusted: a reference can
    be valid as data but no longer find its face (the other branch changed
    the geometry it pointed at). The rebuild's sick-feature report (roadmap
@@ -222,27 +261,14 @@ faces and edges, two things must hold for merges to stay correct:
 
 ## Next steps
 
-1. Resolve invalid merges in the merge dialog, by editing the merged part
-   before recording it (a merge with a hand-edited result).
-2. Content-addressed storage for large histories.
-3. Rebuild-on-merge with sick-feature reporting, once the rebuilder exists.
-4. Project folders, project-level versions and releases, where-used.
+1. Move the engine onto the project store: object store, refs under a lock,
+   microversion log, project file, releases. Built on the foundations PR
+   (UUIDv7 ids, values with units), which also removes renumbering.
+2. Resolve invalid merges in the merge dialog, by editing the merged part
+   before recording it.
+3. Rebuild after every merge and report references that no longer resolve
+   as sick features.
+4. Finer merges of sketches (per entity, using sketch entity ids) and of
+   duplicate value names (rename the incoming one, rewrite its expressions by
+   the value's id).
 5. Version manager UI.
-
-## Decisions for the owner
-
-These change the format or the product's direction, so they need your call.
-Each has a default that is already in place or easy to reverse.
-
-1. **Snapshots or operation log.** Default: snapshots, with the change log
-   computed. Onshape stores every edit (microversions). Recording each edit
-   would give a finer history, at the cost of more storage and a format that
-   is harder to change.
-2. **History inside the part file, or next to it.** Default: inside, so a
-   part carries its history when copied or emailed. The alternative is a
-   project-level store, which handles cross-document versions more naturally
-   and keeps part files small.
-3. **Git compatibility.** Default: none. Offering it means storing documents
-   as unzipped JSON in project folders as an option.
-4. **Release states and read-only releases.** Proposed above; needs your
-   rules (who can release, whether released versions can be branched from).
