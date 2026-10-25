@@ -101,7 +101,11 @@ of the face's surface. The hash ignores orientation, because a cut inverts
 the tool. This is our equivalent of OCAF's `MODIFY` evolution, and it needs
 nothing from truck except that it keep copying surfaces. The tests check it in
 the pocket, slot, inserted-feature and hole scenarios: no face of the
-rebuilt model may be left `unknown`.
+rebuilt model may be left `unknown`. Faces whose surface matches no input
+face, or more than one, are listed in `BodyNaming::untraced`, and every test
+rebuild asserts that list is empty. If a kernel change ever merges or
+rebuilds surfaces (for example a coplanar-face clean-up), the tests fail
+loudly instead of references quietly going wrong.
 
 `sm_kernel::rebuild_observed` reports each tool and each body change to a
 `RebuildObserver`. The `sm-naming` tracker carries a `surface → origin` map
@@ -140,9 +144,12 @@ Onshape-style adjacency queries.
 - `Exact`: the name exists unchanged.
 - `Healed`: the entity is there but its name changed. For example, a split
   face became whole again, or its neighbours changed. The best match is
-  unique (scored by overlap of split neighbours). The caller should store
-  the new name.
-- `Ambiguous`: several candidates fit equally well. The typical case is a
+  unique: neighbour overlap decides, and matching ordinals only break exact
+  ties. A stored fragment only heals onto a face that still touches at
+  least one of its distinguishing neighbours. If the fragment was cut away,
+  its surviving sibling is not a match, and the reference is `Lost`.
+- `Ambiguous`: several candidates fit equally well, or several entities
+  carry the exact name. The typical case is a
   reference taken on a whole face that a later edit split. Inventor would
   mark the feature sick. A fillet might choose to use all candidates. The
   feature decides; the naming layer doesn't pick one at random.
@@ -153,10 +160,21 @@ A feature resolves its references against `NamedRebuild::naming_before(id)`,
 the model as it stood just above that feature, which matches Inventor's
 rollback semantics.
 
+Resolution is read-only. A `Healed` result never rewrites the document
+during a rebuild, because a rebuild that edits the file would show up as a
+phantom change in version history. The healed name lives in the rebuild
+result. The document is only updated when the user accepts the repair or
+next edits that feature, as with any other edit.
+
 ### 6. Text, merges and the local-first vision
 
 Names are plain serde data and are written into the `.smp` feature tree as
-JSON, next to the feature that uses them. They contain only feature ids and
+structured JSON, next to the feature that uses them. The `Display` form
+(`#7.side(p0.s2)`) is only for people reading logs; it is never parsed back.
+The JSON is versioned with the `.smp` format, and every list in it is capped
+at `MAX_NAME_LIST` (1024) while parsing, because names come from untrusted
+files. Generated names are truncated to the same cap so they always load
+again. They contain only feature ids and
 sketch keys. They contain no kernel pointers, no hashes and no machine- or
 cloud-specific ids, so the same file rebuilds to the same names on any
 machine, fully offline. Two branches that add unrelated features produce
@@ -180,10 +198,31 @@ versioning layer rebuilds with `rebuild_named` and turns any `Ambiguous` or
   works with truck unmodified. If we later fork truck or move to a kernel
   with attribute propagation, only `FaceOrigins::carried` changes. The names
   stay the same.
-- **Snapshots per feature are clones.** `NamedRebuild` keeps the bodies after
-  each feature so `naming_before` works. Solids share geometry through `Arc`,
-  so this is cheap today. The incremental rebuilder (step 3) should own this
-  cache instead.
+- **History as a change log.** `NamedRebuild` logs each body change (one
+  per boolean) rather than copying every body after every feature, and
+  `naming_before` replays the log. Memory grows with the number of booleans,
+  which the kernel already caps (`MAX_TOOLS`). The incremental rebuilder
+  should own this cache later.
+
+## Decided since the first draft
+
+These come from the design-decisions thread, working under the owner's
+delegation:
+
+- **Ids become UUIDv7.** Feature ids, sketch entity ids and constraint ids
+  are UUIDv7, never reused or renumbered (schema-foundations PR). Names will
+  be built from them, so `TopoName::remap_features` and merge renumbering go
+  away.
+- **Sketch curve ids.** The sketch solver (PR #5) gives every profile
+  segment a `CurveId`. `SketchEdge` becomes that id, which closes limitation
+  1 below.
+- **OpenCASCADE behind our own facade.** The kernel moves to OCCT behind a
+  Rust facade that exposes only our own types. Naming will then be fed from
+  OCCT's Modified/Generated/IsDeleted history, including
+  `UnifySameDomain`'s, instead of by matching truck's surfaces. The names
+  and the resolution rules above don't change; only the place that produces
+  `FaceOrigins` does. truck stays the default backend until OCCT passes the
+  test suite and the owner confirms the switch.
 
 ## Known limitations and next steps
 
