@@ -82,13 +82,22 @@ pub struct SubShape {
 
 impl SubShape {
     pub fn face(index: u32) -> Self {
-        SubShape { kind: SubKind::Face, index }
+        SubShape {
+            kind: SubKind::Face,
+            index,
+        }
     }
     pub fn edge(index: u32) -> Self {
-        SubShape { kind: SubKind::Edge, index }
+        SubShape {
+            kind: SubKind::Edge,
+            index,
+        }
     }
     pub fn vertex(index: u32) -> Self {
-        SubShape { kind: SubKind::Vertex, index }
+        SubShape {
+            kind: SubKind::Vertex,
+            index,
+        }
     }
 }
 
@@ -170,7 +179,9 @@ impl Shape {
 
     /// Every sub-shape of `kind`, in index order.
     pub fn subs(&self, kind: SubKind) -> Vec<SubShape> {
-        (0..self.count(kind)).map(|index| SubShape { kind, index }).collect()
+        (0..self.count(kind))
+            .map(|index| SubShape { kind, index })
+            .collect()
     }
 
     pub fn faces(&self) -> Vec<SubShape> {
@@ -201,8 +212,15 @@ impl Shape {
     pub fn same(&self, a: SubShape, other: &Shape, b: SubShape) -> Result<bool> {
         self.check(a)?;
         other.check(b)?;
-        sys::shape_same(self.inner(), a.kind as u8, a.index, other.inner(), b.kind as u8, b.index)
-            .map_err(kernel)
+        sys::shape_same(
+            self.inner(),
+            a.kind as u8,
+            a.index,
+            other.inner(),
+            b.kind as u8,
+            b.index,
+        )
+        .map_err(kernel)
     }
 
     /// The sub-shape as a shape of its own, e.g. a face to use as a profile.
@@ -262,7 +280,9 @@ impl Shape {
         let v = sys::edge_ends(self.inner(), edge.index).map_err(kernel)?;
         match v.as_slice() {
             [a, b, c, d, e, f] => Ok([[*a, *b, *c], [*d, *e, *f]]),
-            _ => Err(OcctError::Kernel("edge_ends returned malformed data".into())),
+            _ => Err(OcctError::Kernel(
+                "edge_ends returned malformed data".into(),
+            )),
         }
     }
 
@@ -271,7 +291,9 @@ impl Shape {
     /// facets in radians.
     pub fn tessellate(&self, linear: f64, angular: f64) -> Result<Mesh> {
         if !(linear.is_finite() && linear > 0.0 && angular.is_finite() && angular > 0.0) {
-            return Err(OcctError::Input("tessellation tolerances must be positive".into()));
+            return Err(OcctError::Input(
+                "tessellation tolerances must be positive".into(),
+            ));
         }
         let m = sys::tessellate(self.inner(), linear, angular).map_err(kernel)?;
         Ok(Mesh {
@@ -423,7 +445,10 @@ fn indices(shape: &Shape, subs: &[SubShape], kind: SubKind) -> Result<Vec<u32>> 
     subs.iter()
         .map(|s| {
             if s.kind != kind {
-                return Err(OcctError::Input(format!("expected a {kind:?}, got a {:?}", s.kind)));
+                return Err(OcctError::Input(format!(
+                    "expected a {kind:?}, got a {:?}",
+                    s.kind
+                )));
             }
             shape.check(*s)?;
             Ok(s.index)
@@ -458,12 +483,19 @@ pub fn polygon_face(loops: &[Vec<[f64; 3]>]) -> Result<PolygonFace> {
     let extra = sys::op_extra(raw.as_ref().expect("checked in op_from"));
     let total: usize = loops.iter().map(Vec::len).sum();
     if extra.len() != total {
-        return Err(OcctError::Kernel("polygon_face edge map is incomplete".into()));
+        return Err(OcctError::Kernel(
+            "polygon_face edge map is incomplete".into(),
+        ));
     }
     let mut segments = Vec::with_capacity(loops.len());
     let mut at = 0;
     for l in loops {
-        segments.push(extra[at..at + l.len()].iter().map(|&i| SubShape::edge(i)).collect());
+        segments.push(
+            extra[at..at + l.len()]
+                .iter()
+                .map(|&i| SubShape::edge(i))
+                .collect(),
+        );
         at += l.len();
     }
     Ok(PolygonFace {
@@ -513,7 +545,11 @@ pub fn revolve(profile: &Shape, origin: [f64; 3], axis: [f64; 3], angle: f64) ->
 
 /// Fuse, cut or common of `a` with `b`. History argument 0 is `a`, 1 is `b`.
 pub fn boolean(kind: BooleanKind, a: &Shape, b: &Shape) -> Result<Op> {
-    Ok(op_from(sys::boolean_op(kind as u8, a.inner(), b.inner()).map_err(kernel)?, 2)?.0)
+    Ok(op_from(
+        sys::boolean_op(kind as u8, a.inner(), b.inner()).map_err(kernel)?,
+        2,
+    )?
+    .0)
 }
 
 /// Constant-radius fillet on `edges` of `shape`.
@@ -525,14 +561,22 @@ pub fn fillet(shape: &Shape, edges: &[SubShape], radius: f64) -> Result<Op> {
 /// Equal-distance chamfer on `edges` of `shape`.
 pub fn chamfer(shape: &Shape, edges: &[SubShape], distance: f64) -> Result<Op> {
     let idx = indices(shape, edges, SubKind::Edge)?;
-    Ok(op_from(sys::chamfer(shape.inner(), &idx, distance).map_err(kernel)?, 1)?.0)
+    Ok(op_from(
+        sys::chamfer(shape.inner(), &idx, distance).map_err(kernel)?,
+        1,
+    )?
+    .0)
 }
 
 /// Hollows `shape` inwards to wall `thickness`, opening the faces in
 /// `remove` (Inventor's Shell).
 pub fn shell(shape: &Shape, remove: &[SubShape], thickness: f64) -> Result<Op> {
     let idx = indices(shape, remove, SubKind::Face)?;
-    Ok(op_from(sys::shell(shape.inner(), &idx, thickness, 1e-4).map_err(kernel)?, 1)?.0)
+    Ok(op_from(
+        sys::shell(shape.inner(), &idx, thickness, 1e-4).map_err(kernel)?,
+        1,
+    )?
+    .0)
 }
 
 /// Tapers `faces` by `angle` radians relative to the pull `direction`,
@@ -549,7 +593,21 @@ pub fn draft(
     let idx = indices(shape, faces, SubKind::Face)?;
     let ([dx, dy, dz], [px, py, pz], [nx, ny, nz]) = (direction, plane_origin, plane_normal);
     Ok(op_from(
-        sys::draft(shape.inner(), &idx, dx, dy, dz, angle, px, py, pz, nx, ny, nz).map_err(kernel)?,
+        sys::draft(
+            shape.inner(),
+            &idx,
+            dx,
+            dy,
+            dz,
+            angle,
+            px,
+            py,
+            pz,
+            nx,
+            ny,
+            nz,
+        )
+        .map_err(kernel)?,
         1,
     )?
     .0)

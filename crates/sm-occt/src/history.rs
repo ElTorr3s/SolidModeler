@@ -64,7 +64,10 @@ impl History {
             if out.index >= result.count(out.kind) {
                 return Err(bad());
             }
-            h.forward.entry((arg, input)).or_default().push((relation, out));
+            h.forward
+                .entry((arg, input))
+                .or_default()
+                .push((relation, out));
             h.backward.entry(out).or_default().push(Source {
                 arg,
                 sub: input,

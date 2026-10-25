@@ -80,7 +80,8 @@ fn find_worker(opts: &ImportOptions) -> Result<PathBuf> {
     if let Some(p) = &opts.worker {
         return Ok(p.clone());
     }
-    let exe = std::env::current_exe().map_err(|e| step_err(format!("cannot locate executable: {e}")))?;
+    let exe =
+        std::env::current_exe().map_err(|e| step_err(format!("cannot locate executable: {e}")))?;
     let name = format!("sm-step-worker{}", std::env::consts::EXE_SUFFIX);
     let mut dir = exe.parent();
     for _ in 0..2 {
@@ -91,7 +92,10 @@ fn find_worker(opts: &ImportOptions) -> Result<PathBuf> {
         }
         dir = d.parent();
     }
-    Err(step_err(format!("{name} not found next to {}", exe.display())))
+    Err(step_err(format!(
+        "{name} not found next to {}",
+        exe.display()
+    )))
 }
 
 /// Reads every solid from a STEP file. See the module docs for the stages.
@@ -134,7 +138,12 @@ fn accept(brep: &[u8]) -> Result<Shape> {
         return Err(step_err("OpenCascade reports the solid as invalid"));
     }
     let b = shape.bounding_box()?;
-    if !b.min.iter().chain(&b.max).all(|v| v.is_finite() && v.abs() <= MAX_COORD) {
+    if !b
+        .min
+        .iter()
+        .chain(&b.max)
+        .all(|v| v.is_finite() && v.abs() <= MAX_COORD)
+    {
         return Err(step_err("solid lies outside the 10 km modelling range"));
     }
     Ok(shape)
@@ -154,7 +163,9 @@ fn run_worker(bytes: &[u8], opts: &ImportOptions) -> Result<Vec<u8>> {
         .spawn()
         .map_err(|e| step_err(format!("cannot start {}: {e}", worker.display())))?;
 
-    let max_output = (bytes.len() as u64).saturating_mul(16).saturating_add(64 << 20);
+    let max_output = (bytes.len() as u64)
+        .saturating_mul(16)
+        .saturating_add(64 << 20);
     let mut stdin = child.stdin.take().expect("piped");
     let mut stdout = child.stdout.take().expect("piped");
     let mut stderr = child.stderr.take().expect("piped");
@@ -235,20 +246,27 @@ impl<'a> Cursor<'a> {
         Ok(self.take(1)?[0])
     }
     fn u32(&mut self) -> Result<u32> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("4 bytes")))
+        Ok(u32::from_le_bytes(
+            self.take(4)?.try_into().expect("4 bytes"),
+        ))
     }
     fn u64(&mut self) -> Result<u64> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("8 bytes")))
+        Ok(u64::from_le_bytes(
+            self.take(8)?.try_into().expect("8 bytes"),
+        ))
     }
     fn f64(&mut self) -> Result<f64> {
-        Ok(f64::from_le_bytes(self.take(8)?.try_into().expect("8 bytes")))
+        Ok(f64::from_le_bytes(
+            self.take(8)?.try_into().expect("8 bytes"),
+        ))
     }
     fn string(&mut self, max: usize) -> Result<String> {
         let n = self.u32()? as usize;
         if n > max {
             return Err(step_err("worker output has an oversized string"));
         }
-        String::from_utf8(self.take(n)?.to_vec()).map_err(|_| step_err("worker output is not UTF-8"))
+        String::from_utf8(self.take(n)?.to_vec())
+            .map_err(|_| step_err("worker output is not UTF-8"))
     }
 }
 
@@ -400,10 +418,20 @@ pub fn export_step(bodies: &[ExportBody], path: &Path) -> Result<()> {
     for b in bodies {
         let [r, g, bl] = b.color.unwrap_or_default();
         if b.color.is_some() && ![r, g, bl].iter().all(|v| (0.0..=1.0).contains(v)) {
-            return Err(OcctError::Input("colour components must be within 0..1".into()));
+            return Err(OcctError::Input(
+                "colour components must be within 0..1".into(),
+            ));
         }
-        sys::step_writer_add(writer.pin_mut(), b.shape.inner(), b.name, b.color.is_some(), r, g, bl)
-            .map_err(super::kernel)?;
+        sys::step_writer_add(
+            writer.pin_mut(),
+            b.shape.inner(),
+            b.name,
+            b.color.is_some(),
+            r,
+            g,
+            bl,
+        )
+        .map_err(super::kernel)?;
     }
     sys::step_writer_write(writer.pin_mut(), path).map_err(super::kernel)
 }

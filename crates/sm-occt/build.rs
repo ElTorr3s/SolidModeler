@@ -5,10 +5,35 @@
 use std::path::{Path, PathBuf};
 
 const LIBS: &[&str] = &[
-    "TKernel", "TKMath", "TKG2d", "TKG3d", "TKGeomBase", "TKGeomAlgo", "TKBRep", "TKTopAlgo",
-    "TKPrim", "TKBO", "TKBool", "TKFillet", "TKOffset", "TKFeat", "TKShHealing", "TKMesh",
-    "TKXSBase", "TKSTEP", "TKSTEPBase", "TKSTEP209", "TKSTEPAttr", "TKXDESTEP", "TKXCAF",
-    "TKLCAF", "TKCAF", "TKCDF", "TKVCAF", "TKService", "TKV3d",
+    "TKernel",
+    "TKMath",
+    "TKG2d",
+    "TKG3d",
+    "TKGeomBase",
+    "TKGeomAlgo",
+    "TKBRep",
+    "TKTopAlgo",
+    "TKPrim",
+    "TKBO",
+    "TKBool",
+    "TKFillet",
+    "TKOffset",
+    "TKFeat",
+    "TKShHealing",
+    "TKMesh",
+    "TKXSBase",
+    "TKSTEP",
+    "TKSTEPBase",
+    "TKSTEP209",
+    "TKSTEPAttr",
+    "TKXDESTEP",
+    "TKXCAF",
+    "TKLCAF",
+    "TKCAF",
+    "TKCDF",
+    "TKVCAF",
+    "TKService",
+    "TKV3d",
 ];
 
 fn include_dir() -> PathBuf {
@@ -49,7 +74,10 @@ fn main() {
         .compile("sm-occt-shim");
 
     if let Some(dir) = std::env::var_os("OCCT_LIB_DIR") {
-        println!("cargo:rustc-link-search=native={}", Path::new(&dir).display());
+        println!(
+            "cargo:rustc-link-search=native={}",
+            Path::new(&dir).display()
+        );
     }
     for lib in LIBS {
         println!("cargo:rustc-link-lib=dylib={lib}");

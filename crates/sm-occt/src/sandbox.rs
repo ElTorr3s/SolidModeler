@@ -41,12 +41,10 @@ pub fn lock_down(_: &WorkerLimits) -> Result<(), String> {
 #[cfg(target_os = "linux")]
 mod linux {
     use super::WorkerLimits;
-    use landlock::{
-        Access, AccessFs, AccessNet, Ruleset, RulesetAttr, RulesetStatus, Scope, ABI,
-    };
+    use landlock::{Access, AccessFs, AccessNet, Ruleset, RulesetAttr, RulesetStatus, Scope, ABI};
     use seccompiler::{
-        BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition,
-        SeccompFilter, SeccompRule, TargetArch,
+        BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
+        SeccompRule, TargetArch,
     };
     use std::collections::BTreeMap;
 
@@ -108,8 +106,13 @@ mod linux {
     const ARCH: TargetArch = TargetArch::aarch64;
 
     fn masked(arg: u8, bits: u64) -> Result<SeccompRule, String> {
-        let cond = SeccompCondition::new(arg, SeccompCmpArgLen::Dword, SeccompCmpOp::MaskedEq(bits), bits)
-            .map_err(|e| e.to_string())?;
+        let cond = SeccompCondition::new(
+            arg,
+            SeccompCmpArgLen::Dword,
+            SeccompCmpOp::MaskedEq(bits),
+            bits,
+        )
+        .map_err(|e| e.to_string())?;
         SeccompRule::new(vec![cond]).map_err(|e| e.to_string())
     }
 

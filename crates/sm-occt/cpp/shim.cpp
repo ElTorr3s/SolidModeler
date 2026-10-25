@@ -326,9 +326,10 @@ std::unique_ptr<OpResult> polygon_face(rust::Slice<const double> points,
     std::vector<TopoDS_Edge> seg;
     for (size_t k = 0; k < loops[li].size(); ++k) {
       poly.Add(loops[li][k]);
-      require(poly.Added(), "could not add a polygon point");
-      if (k > 0)
+      if (k > 0) {
+        require(poly.Added(), "could not add a polygon point");
         seg.push_back(poly.Edge());
+      }
     }
     poly.Close();
     require(poly.IsDone(), "could not build a polygon loop");

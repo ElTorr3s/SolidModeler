@@ -17,7 +17,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match std::io::stdout().write_all(&out).and_then(|()| std::io::stdout().flush()) {
+    match std::io::stdout()
+        .write_all(&out)
+        .and_then(|()| std::io::stdout().flush())
+    {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::FAILURE,
     }
