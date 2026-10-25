@@ -1,0 +1,57 @@
+[package]
+name = "sm-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+libfuzzer-sys = "0.4"
+sm-document = { path = "../crates/sm-document" }
+sm-format = { path = "../crates/sm-format" }
+sm-kernel = { path = "../crates/sm-kernel" }
+sm-step = { path = "../crates/sm-step" }
+sm-testkit = { path = "../crates/sm-testkit" }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+truck-stepio = "0.3"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+
+# Not part of the main workspace: fuzzing needs nightly and libFuzzer.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "smp_read"
+path = "fuzz_targets/smp_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "smp_document"
+path = "fuzz_targets/smp_document.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rebuild"
+path = "fuzz_targets/rebuild.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "step_read"
+path = "fuzz_targets/step_read.rs"
+test = false
+doc = false
+bench = false
+
+[[example]]
+name = "make_corpus"

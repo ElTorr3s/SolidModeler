@@ -3,7 +3,9 @@ name = "sm-format"
 description = "Reads and writes the native .smp part file"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 sm-document.workspace = true
@@ -12,3 +14,12 @@ serde_json.workspace = true
 thiserror.workspace = true
 zip.workspace = true
 tempfile = "3"
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+sm-testkit = { workspace = true, features = ["proptest"] }
+
+[[bench]]
+name = "smp"
+harness = false

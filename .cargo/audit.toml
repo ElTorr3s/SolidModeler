@@ -1,0 +1,11 @@
+# cargo-audit ignores. Keep in sync with [advisories] in deny.toml, which
+# records the reason for each one.
+[advisories]
+ignore = [
+    "RUSTSEC-2026-0041",
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    "RUSTSEC-2026-0196",
+    "RUSTSEC-2026-0197",
+    "RUSTSEC-2024-0370",
+]
