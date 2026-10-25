@@ -629,3 +629,23 @@ fn duplicate_exact_names_are_ambiguous() {
         Resolution::Ambiguous(v) if v.len() == 2
     ));
 }
+
+#[test]
+fn batch_resolver_agrees_with_single_resolution() {
+    let (doc, _) = slotted_block();
+    let r = build(&doc);
+    let resolver = r.naming().resolver();
+    let b = &r.naming().bodies[0];
+    let names = b
+        .faces
+        .iter()
+        .cloned()
+        .map(TopoName::Face)
+        .chain(b.edges.iter().cloned().map(TopoName::Edge))
+        .chain(b.vertices.iter().cloned().map(TopoName::Vertex));
+    for n in names {
+        let one = r.naming().resolve(&n);
+        assert!(matches!(one, Resolution::Exact(_)), "{n}");
+        assert_eq!(resolver.resolve(&n), one);
+    }
+}

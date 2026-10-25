@@ -25,8 +25,7 @@ pub use tools::{extrude_tool, revolve_tool, FaceOrigins, RevolveAxis};
 
 use sm_document::{FeatureId, PartDocument};
 use sm_kernel::{Model, RebuildError};
-use std::collections::HashMap;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use track::{Change, Tracker};
 
 /// Which kind of entity a reference points at.
@@ -103,37 +102,106 @@ impl Naming {
         }
     }
 
-    /// Finds the entity a stored name refers to.
+    /// Finds the entity a stored name refers to. To resolve many names
+    /// against one model, build a [`Resolver`] once instead.
     pub fn resolve(&self, name: &TopoName) -> Resolution {
-        let mut scored: Vec<(EntityRef, Score)> = Vec::new();
+        self.resolver().resolve(name)
+    }
+
+    /// An index of this naming for resolving many names.
+    pub fn resolver(&self) -> Resolver<'_> {
+        let mut index: HashMap<Key, Vec<EntityRef>> = HashMap::new();
         for (body, naming) in self.bodies.iter().enumerate() {
             let at = |kind, index| EntityRef { kind, body, index };
-            match name {
-                TopoName::Face(n) => {
-                    scored.extend(naming.faces.iter().enumerate().filter_map(|(i, c)| {
-                        let touching = naming.neighbours.get(i).map(Vec::as_slice);
+            for (i, f) in naming.faces.iter().enumerate() {
+                index
+                    .entry(face_key(f))
+                    .or_default()
+                    .push(at(EntityKind::Face, i));
+            }
+            for (i, e) in naming.edges.iter().enumerate() {
+                index
+                    .entry(edge_key(e))
+                    .or_default()
+                    .push(at(EntityKind::Edge, i));
+            }
+            for (i, v) in naming.vertices.iter().enumerate() {
+                index
+                    .entry(vertex_key(v))
+                    .or_default()
+                    .push(at(EntityKind::Vertex, i));
+            }
+        }
+        Resolver {
+            naming: self,
+            index,
+        }
+    }
+}
+
+/// The part of a name every candidate must share exactly: the origins of
+/// the faces involved. Scoring only ever compares entities with equal keys.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Key {
+    Face(FaceOrigin),
+    Edge([FaceOrigin; 2]),
+    Vertex(Vec<FaceOrigin>),
+}
+
+fn face_key(f: &FaceName) -> Key {
+    Key::Face(f.origin)
+}
+
+fn edge_key(e: &EdgeName) -> Key {
+    let mut pair = [e.faces[0].origin, e.faces[1].origin];
+    pair.sort();
+    Key::Edge(pair)
+}
+
+fn vertex_key(v: &VertexName) -> Key {
+    let mut origins: Vec<FaceOrigin> = v.faces.iter().map(|f| f.origin).collect();
+    origins.sort();
+    Key::Vertex(origins)
+}
+
+/// A [`Naming`] indexed by origin, so each name is scored only against
+/// entities from the same features and roles.
+pub struct Resolver<'a> {
+    naming: &'a Naming,
+    index: HashMap<Key, Vec<EntityRef>>,
+}
+
+impl Resolver<'_> {
+    /// Finds the entity a stored name refers to.
+    pub fn resolve(&self, name: &TopoName) -> Resolution {
+        let key = match name {
+            TopoName::Face(n) => face_key(n),
+            TopoName::Edge(n) => edge_key(n),
+            TopoName::Vertex(n) => vertex_key(n),
+        };
+        let candidates = self.index.get(&key).map_or(&[][..], Vec::as_slice);
+        let scored: Vec<(EntityRef, Score)> = candidates
+            .iter()
+            .filter_map(|&e| {
+                let body = &self.naming.bodies[e.body];
+                let score = match name {
+                    TopoName::Face(n) => {
+                        let touching = body.neighbours.get(e.index).map(Vec::as_slice);
                         if !still_touches(&n.split, touching) {
                             return None;
                         }
-                        score_face(n, c).map(|s| (at(EntityKind::Face, i), s))
-                    }))
-                }
-                TopoName::Edge(n) => {
-                    scored.extend(naming.edges.iter().enumerate().filter_map(|(i, c)| {
-                        score_edge(n, c).map(|s| (at(EntityKind::Edge, i), s))
-                    }))
-                }
-                TopoName::Vertex(n) => {
-                    scored.extend(naming.vertices.iter().enumerate().filter_map(|(i, c)| {
-                        score_vertex(n, c).map(|s| (at(EntityKind::Vertex, i), s))
-                    }))
-                }
-            }
-        }
+                        score_face(n, &body.faces[e.index])
+                    }
+                    TopoName::Edge(n) => score_edge(n, &body.edges[e.index]),
+                    TopoName::Vertex(n) => score_vertex(n, &body.vertices[e.index]),
+                };
+                score.map(|s| (e, s))
+            })
+            .collect();
         let exact: Vec<EntityRef> = scored
             .iter()
             .map(|&(e, _)| e)
-            .filter(|&e| &self.name_of(e) == name)
+            .filter(|&e| &self.naming.name_of(e) == name)
             .collect();
         match exact.as_slice() {
             [e] => return Resolution::Exact(*e),
@@ -306,7 +374,8 @@ impl NamedRebuild {
 
     /// Names for the model as `feature` sees it, i.e. after every feature
     /// above it. A feature's own references resolve against this. An id not
-    /// in the document gives the final names.
+    /// in the document gives the final names. Each call replays the change
+    /// log and names the bodies afresh, so call it once per feature.
     pub fn naming_before(&self, feature: FeatureId) -> Naming {
         let Some(&limit) = self.position.get(&feature) else {
             return self.naming.clone();
