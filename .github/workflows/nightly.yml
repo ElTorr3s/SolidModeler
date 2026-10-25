@@ -32,16 +32,18 @@ jobs:
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-fuzz
+      # The prebuilt cargo-fuzz is a musl binary and would default to the musl
+      # target, which ASan can't build; every cargo fuzz call names the target.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: fuzz
-      - run: cargo fuzz build -O ${{ matrix.target }}
+      - run: cargo fuzz build -O --target x86_64-unknown-linux-gnu ${{ matrix.target }}
       - name: Fuzz
         run: |
           dict=""
           [ "${{ matrix.target }}" = smp_document ] && dict="-dict=fuzz/smp.dict"
           mkdir -p work && cp fuzz/corpus/${{ matrix.target }}/* work/ 2>/dev/null || true
-          cargo fuzz run -O ${{ matrix.target }} work -- \
+          cargo fuzz run -O --target x86_64-unknown-linux-gnu ${{ matrix.target }} work -- \
             -max_total_time=1200 -rss_limit_mb=2048 -timeout=10 -max_len=200000 $dict
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
@@ -64,7 +66,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: fuzz
-      - run: cargo fuzz build -O
+      - run: cargo fuzz build -O --target x86_64-unknown-linux-gnu
       # Each file in fuzz/regressions reproduces an open finding. This job is
       # red until they are all fixed; then move them into fuzz/corpus.
       - name: Replay

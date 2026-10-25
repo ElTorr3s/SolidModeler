@@ -145,10 +145,12 @@ jobs:
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-fuzz
+      # The prebuilt cargo-fuzz is a musl binary and would default to the musl
+      # target, which ASan can't build; every cargo fuzz call names the target.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: fuzz
-      - run: cargo fuzz build -O
+      - run: cargo fuzz build -O --target x86_64-unknown-linux-gnu
       # step_read is left to the nightly job: truck-stepio still has known
       # panics (fuzz/regressions/step_read) that would fail every PR.
       - name: Run targets
@@ -156,7 +158,7 @@ jobs:
           for target in smp_read smp_document rebuild; do
             dict=""
             [ "$target" = smp_document ] && dict="-dict=fuzz/smp.dict"
-            cargo fuzz run -O "$target" "fuzz/corpus/$target" -- \
+            cargo fuzz run -O --target x86_64-unknown-linux-gnu "$target" "fuzz/corpus/$target" -- \
               -max_total_time=60 -rss_limit_mb=2048 -timeout=10 -max_len=200000 $dict
           done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
