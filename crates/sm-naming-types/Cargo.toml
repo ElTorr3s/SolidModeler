@@ -1,0 +1,15 @@
+[package]
+name = "sm-naming-types"
+description = "Persistent topology names as plain data, for crates that store references"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Only for FeatureId; moves to sm-ids when that crate lands, so sm-document
+# can depend on this crate without a cycle.
+sm-document.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

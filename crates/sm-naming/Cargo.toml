@@ -1,0 +1,16 @@
+[package]
+name = "sm-naming"
+description = "Persistent names for faces, edges and vertices that survive rebuilds"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sm-document.workspace = true
+sm-kernel.workspace = true
+sm-naming-types.workspace = true
+serde.workspace = true
+truck-modeling.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

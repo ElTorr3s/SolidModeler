@@ -10,12 +10,26 @@ repository = "https://github.com/eltorr3s/solidmodeler"
 
 [workspace.dependencies]
 sm-document = { path = "crates/sm-document" }
+sm-expr = { path = "crates/sm-expr" }
+sm-ids = { path = "crates/sm-ids" }
 sm-format = { path = "crates/sm-format" }
 sm-kernel = { path = "crates/sm-kernel" }
+sm-naming = { path = "crates/sm-naming" }
+sm-naming-types = { path = "crates/sm-naming-types" }
 sm-step = { path = "crates/sm-step" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+uuid = { version = "1", features = ["v7", "serde"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 truck-modeling = "0.6"
 truck-stepio = "0.3"
+truck-shapeops = "0.4"
+
+# truck is slow unoptimised; optimise dependencies even in dev builds.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
