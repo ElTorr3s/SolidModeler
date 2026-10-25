@@ -31,6 +31,7 @@
 #include <Poly_Triangulation.hxx>
 #include <Precision.hxx>
 #include <Quantity_Color.hxx>
+#include <STEPCAFControl_Controller.hxx>
 #include <STEPCAFControl_Reader.hxx>
 #include <STEPCAFControl_Writer.hxx>
 #include <STEPControl_Reader.hxx>
@@ -223,6 +224,7 @@ std::string alerts(const BRepAlgoAPI_BooleanOperation &algo) {
 // STEP translation uses process-wide static parameters; Rust serialises
 // calls with a mutex.
 void step_static_params() {
+  STEPCAFControl_Controller::Init();
   Interface_Static::SetCVal("xstep.cascade.unit", "MM");
   Interface_Static::SetCVal("write.step.unit", "MM");
   Interface_Static::SetCVal("write.step.schema", "AP242DIS");
@@ -689,8 +691,12 @@ struct StepCollector {
   static std::string name_of(const TDF_Label &label) {
     Handle(TDataStd_Name) name;
     if (label.FindAttribute(TDataStd_Name::GetID(), name)) {
-      TCollection_AsciiString ascii(name->Get(), '?');
-      return ascii.ToCString();
+      const TCollection_ExtendedString &ext = name->Get();
+      std::string utf8(static_cast<size_t>(ext.LengthOfCString()) + 1, '\0');
+      Standard_PCharacter buf = &utf8[0];
+      const int n = ext.ToUTF8CString(buf);
+      utf8.resize(static_cast<size_t>(n > 0 ? n : 0));
+      return utf8;
     }
     return std::string();
   }
@@ -699,6 +705,12 @@ struct StepCollector {
     for (XCAFDoc_ColorType t : {XCAFDoc_ColorSurf, XCAFDoc_ColorGen})
       if (colors->GetColor(label, t, c) || colors->GetColor(shape, t, c))
         return true;
+    // Many exporters colour faces rather than the solid; use the first
+    // coloured face.
+    for (TopExp_Explorer ex(shape, TopAbs_FACE); ex.More(); ex.Next())
+      for (XCAFDoc_ColorType t : {XCAFDoc_ColorSurf, XCAFDoc_ColorGen})
+        if (colors->GetColor(ex.Current(), t, c))
+          return true;
     return false;
   }
 
@@ -752,8 +764,8 @@ struct StepCollector {
 
 rust::Vec<StepBody> read_step(rust::Slice<const uint8_t> bytes, uint32_t max_bodies) {
   Handle(TDocStd_Document) doc = new_xcaf_document();
-  STEPCAFControl_Reader reader;
   step_static_params();
+  STEPCAFControl_Reader reader;
   reader.SetNameMode(Standard_True);
   reader.SetColorMode(Standard_True);
   reader.SetLayerMode(Standard_False);
@@ -809,8 +821,9 @@ void step_writer_add(StepWriter &w, const Shape &s, rust::Str name, bool has_col
 }
 
 void step_writer_write(StepWriter &w, rust::Str path) {
-  STEPCAFControl_Writer writer;
+  // The schema is read when the writer's model is created.
   step_static_params();
+  STEPCAFControl_Writer writer;
   writer.SetNameMode(Standard_True);
   writer.SetColorMode(Standard_True);
   require(writer.Transfer(w.impl->doc, STEPControl_AsIs), "could not transfer shapes to STEP");
