@@ -1,5 +1,7 @@
-//! The names themselves. They are plain data, ordered and serialisable, so
-//! a reference stored in the feature tree diffs and merges as text.
+//! Persistent names for faces, edges and vertices, as plain data: ordered,
+//! serialisable, and free of kernel types, so a reference stored in the
+//! feature tree diffs and merges as text. `sm-naming` creates and resolves
+//! them; see `docs/topological-naming.md`.
 
 use serde::{Deserialize, Serialize};
 use sm_document::FeatureId;
@@ -269,5 +271,68 @@ impl TopoName {
         out.sort();
         out.dedup();
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn origin(feature: u32, segment: u32) -> FaceOrigin {
+        FaceOrigin {
+            feature: FeatureId(feature),
+            role: FaceRole::Side {
+                edge: SketchEdge {
+                    profile: 0,
+                    segment,
+                },
+                piece: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn json_shape_is_stable_and_round_trips() {
+        let name = TopoName::Face(FaceName {
+            origin: origin(7, 2),
+            split: vec![origin(3, 1)],
+            ordinal: None,
+        });
+        let json = serde_json::to_string(&name).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"face","origin":{"feature":7,"role":"side","edge":{"profile":0,"segment":2}},"split":[{"feature":3,"role":"side","edge":{"profile":0,"segment":1}}]}"#
+        );
+        assert_eq!(serde_json::from_str::<TopoName>(&json).unwrap(), name);
+        assert_eq!(name.to_string(), "#7.side(p0.s2)[#3.side(p0.s1)]");
+    }
+
+    #[test]
+    fn lists_over_the_cap_are_rejected() {
+        let one = serde_json::to_string(&origin(1, 0)).unwrap();
+        let face = |n: usize| {
+            format!(
+                r#"{{"origin":{one},"split":[{}]}}"#,
+                vec![one.as_str(); n].join(",")
+            )
+        };
+        assert!(serde_json::from_str::<FaceName>(&face(MAX_NAME_LIST)).is_ok());
+        assert!(serde_json::from_str::<FaceName>(&face(MAX_NAME_LIST + 1)).is_err());
+    }
+
+    #[test]
+    fn remap_rewrites_and_resorts() {
+        let mut name = TopoName::Face(FaceName {
+            origin: origin(1, 0),
+            split: vec![origin(2, 0), origin(3, 0)],
+            ordinal: None,
+        });
+        name.remap_features(|f| FeatureId(10 - f.0));
+        let TopoName::Face(f) = &name else {
+            unreachable!()
+        };
+        assert_eq!(f.origin.feature, FeatureId(9));
+        assert_eq!(f.split, [origin(7, 0), origin(8, 0)]);
+        assert_eq!(name.features(), [FeatureId(7), FeatureId(8), FeatureId(9)]);
     }
 }

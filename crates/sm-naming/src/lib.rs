@@ -13,15 +13,14 @@
 //! match rebuilt.naming().resolve(&TopoName::Face(name)) { ... }
 //! ```
 
-mod name;
 mod naming;
 mod tools;
 mod track;
 
-pub use name::{
+pub use naming::{BodyNaming, Entities};
+pub use sm_naming_types::{
     EdgeName, FaceName, FaceOrigin, FaceRole, SketchEdge, TopoName, VertexName, MAX_NAME_LIST,
 };
-pub use naming::{BodyNaming, Entities};
 pub use tools::{extrude_tool, revolve_tool, FaceOrigins, RevolveAxis};
 
 use sm_document::{FeatureId, PartDocument};

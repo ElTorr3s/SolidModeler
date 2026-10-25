@@ -5,10 +5,10 @@
 //! Faces are classified by geometry, not by the order truck's sweeps emit
 //! them in, so a change inside truck can't silently shuffle names.
 
-use crate::name::{FaceOrigin, FaceRole, SketchEdge};
 use sm_document::{FeatureId, Profile};
 use sm_kernel::profile::{Point2, Region};
 use sm_kernel::{Frame, LINEAR_TOLERANCE};
+use sm_naming_types::{FaceOrigin, FaceRole, SketchEdge};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};

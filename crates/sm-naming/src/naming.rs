@@ -1,9 +1,9 @@
 //! Turns face origins into full names for every face, edge and vertex of a
 //! body, telling apart fragments of split faces by their neighbours.
 
-use crate::name::{EdgeName, FaceName, FaceOrigin, FaceRole, VertexName, MAX_NAME_LIST};
 use crate::tools::{faces, surface_key, FaceOrigins};
 use sm_document::FeatureId;
+use sm_naming_types::{EdgeName, FaceName, FaceOrigin, FaceRole, VertexName, MAX_NAME_LIST};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[cfg(test)]
 use truck_modeling::Vector3;

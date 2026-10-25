@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 sm-document.workspace = true
 sm-kernel.workspace = true
+sm-naming-types.workspace = true
 serde.workspace = true
 truck-modeling.workspace = true
 
