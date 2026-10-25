@@ -63,7 +63,9 @@ Rust.
 - **Untrusted files.** OCCT never parses untrusted bytes in the app process (Sentinel's
   condition). STEP import has two stages. First, a bounded Rust Part 21 parser screens
   the file. Then OCCT reads it in a sandboxed worker subprocess (landlock, seccomp,
-  rlimits, timeout).
+  rlimits, timeout). The sandbox is mandatory in every build, with no switch to turn it
+  off. The worker takes the file's bytes on stdin and returns only a serialized B-rep,
+  which the parent validates.
 - **Persistent naming** lives in our own layer. OCCT's per-operation history
   (Modified, Generated, IsDeleted) feeds it.
 - **Reproducibility.** The kernel backend and version are recorded with cached geometry
@@ -201,6 +203,12 @@ with a `kind` field (one loader, one MIME type).
 - **Git:** the layout is git-compatible, as plain canonical JSON files with a
   deterministic export. The app never needs git and never runs it on a project folder,
   because a hostile `.git/config` can execute code (Sentinel).
+- **Untrusted stores** (Sentinel, on review of this record):
+  - Object ids must be exact-length lowercase hex before they are used as paths, and
+    paths are never built from names inside objects.
+  - Every object and pack entry is re-hashed and verified on read.
+  - Pack entries, objects, log records and per-project totals have size caps. Counts in
+    pack headers are never trusted.
 
 **Vote: 8-1 for an object store as the source of truth.** The local-first expert voted
 for SQLite, in Fossil's style: a single file with transactions, crash safety and fast
