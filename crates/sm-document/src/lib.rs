@@ -183,6 +183,9 @@ pub enum DocumentError {
 
 /// Far beyond any real part; stops corrupt or hostile files early.
 pub const MAX_FEATURES: usize = 100_000;
+/// Largest feature id a valid document may use. Far below `u32::MAX`, so
+/// handing out the next id can never overflow.
+pub const MAX_FEATURE_ID: u32 = 1 << 24;
 
 impl PartDocument {
     pub fn new(name: impl Into<String>, units: LengthUnit) -> Self {
@@ -199,8 +202,10 @@ impl PartDocument {
     /// Appends a feature to the end of the history and returns its id.
     pub fn add_feature(&mut self, name: impl Into<String>, kind: FeatureKind) -> FeatureId {
         self.repair_ids();
+        // Ids in a valid document stay far below u32::MAX; an invalid one
+        // can repeat an id here, which validate() then reports.
         let id = FeatureId(self.next_id);
-        self.next_id = self.next_id.checked_add(1).expect("feature ids exhausted");
+        self.next_id = self.next_id.saturating_add(1);
         self.features.push(Feature {
             id,
             name: name.into(),
@@ -251,7 +256,7 @@ impl PartDocument {
             return Err(DocumentError::TooManyFeatures);
         }
         for (i, feature) in self.features.iter().enumerate() {
-            if feature.id.0 == u32::MAX {
+            if feature.id.0 == 0 || feature.id.0 > MAX_FEATURE_ID {
                 return Err(DocumentError::IdOutOfRange(feature.id));
             }
             if index.insert(feature.id, i).is_some() {
@@ -425,13 +430,24 @@ mod tests {
     }
 
     #[test]
-    fn rejects_max_id() {
+    fn rejects_out_of_range_ids() {
+        for bad in [0, MAX_FEATURE_ID + 1, u32::MAX - 1, u32::MAX] {
+            let mut doc = block();
+            doc.features[1].id = FeatureId(bad);
+            assert_eq!(
+                doc.validate(),
+                Err(DocumentError::IdOutOfRange(FeatureId(bad)))
+            );
+            // Adding features to such a document never panics.
+            doc.add_feature("S", empty_sketch());
+            doc.add_feature("S", empty_sketch());
+            assert!(doc.validate().is_err());
+        }
         let mut doc = block();
-        doc.features[1].id = FeatureId(u32::MAX);
-        assert_eq!(
-            doc.validate(),
-            Err(DocumentError::IdOutOfRange(FeatureId(u32::MAX)))
-        );
+        doc.features[1].id = FeatureId(MAX_FEATURE_ID);
+        assert_eq!(doc.validate(), Ok(()));
+        doc.add_feature("S", empty_sketch());
+        assert!(doc.validate().is_err());
     }
 
     #[test]
