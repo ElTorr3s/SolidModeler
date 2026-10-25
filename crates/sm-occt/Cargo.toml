@@ -1,0 +1,23 @@
+[package]
+name = "sm-occt"
+description = "OpenCascade backend: safe Rust bindings to the system OCCT through a small C++ shim, and the sandboxed STEP import worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cxx = "1.0.205"
+libc = "0.2"
+sm-step.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.7"
+seccompiler = "0.5.0"
+
+[build-dependencies]
+cxx-build = "1.0.205"
+
+[[bin]]
+name = "sm-step-worker"
+path = "src/bin/sm-step-worker.rs"

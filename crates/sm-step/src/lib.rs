@@ -1,6 +1,8 @@
 //! STEP is the exchange format: geometry only, no feature history.
 //! The editable history lives in `.smp` files (see `sm-format`).
 
+pub mod screen;
+
 use sm_kernel::Model;
 use truck_modeling::{builder, Point3, Vector3};
 use truck_stepio::out::{CompleteStepDisplay, StepHeaderDescriptor, StepModels};

@@ -2,3 +2,4 @@
 *.smp
 *.step
 !tests/fixtures/**
+!crates/sm-step/tests/corpus/**
