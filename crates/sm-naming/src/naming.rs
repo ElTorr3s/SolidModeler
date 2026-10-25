@@ -407,7 +407,10 @@ mod tests {
             naming.faces[0].origin.role,
             FaceRole::Unknown { .. }
         ));
-        assert_eq!(naming.faces[1].origin, o(1), "older feature wins");
+        assert!(
+            matches!(naming.faces[1].origin.role, FaceRole::Unknown { .. }),
+            "neither claimant wins"
+        );
 
         let mut clean = FaceOrigins::default();
         for face in &all {

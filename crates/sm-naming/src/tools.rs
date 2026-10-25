@@ -45,11 +45,15 @@ impl FaceOrigins {
         }
     }
 
-    /// The origin of a face with this surface. Two origins sharing one
-    /// surface would take bit-identical construction; the older feature wins
-    /// and [`FaceOrigins::count`] lets callers report the conflict.
+    /// The origin of a face with this surface, if exactly one feature
+    /// claims it. Two origins sharing one surface would take bit-identical
+    /// construction; rather than guess, such a face stays unnamed and is
+    /// reported as untraced.
     pub(crate) fn get(&self, key: SurfaceKey) -> Option<FaceOrigin> {
-        self.by_surface.get(&key).and_then(|o| o.first()).copied()
+        match self.by_surface.get(&key).map(Vec::as_slice) {
+            Some(&[origin]) => Some(origin),
+            _ => None,
+        }
     }
 
     /// How many origins claim this surface; anything but 1 is untraced.
@@ -679,7 +683,7 @@ mod tests {
 
     #[test]
     fn revolve_axis_on_a_profile_point_does_not_panic() {
-        // Profile touching the axis: no crash, every face gets some name.
+        // Profile touching the axis: no crash, every face is traced.
         let (_, _, frame, _) = setup();
         let points = vec![[0.0, 0.0], [3.0, 0.0], [3.0, 2.0], [0.0, 2.0]];
         let profiles = vec![Profile {
@@ -712,7 +716,11 @@ mod tests {
         };
         let origins = revolve_tool(FeatureId(1), &profiles, &region, &frame, axis, &solid, 1e-6);
         for f in faces(&solid) {
-            assert!(origins.get(surface_key(&f)).is_some());
+            // The wall on the axis is degenerate: its pieces share one
+            // surface, so it stays unnamed rather than taking either piece.
+            let key = surface_key(&f);
+            assert!(origins.count(key) >= 1);
+            assert_eq!(origins.get(key).is_some(), origins.count(key) == 1);
         }
         // A profile lying entirely on the axis has no angle reference.
         let on_axis = Region {
