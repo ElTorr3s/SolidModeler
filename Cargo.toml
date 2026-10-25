@@ -12,6 +12,7 @@ repository = "https://github.com/eltorr3s/solidmodeler"
 sm-document = { path = "crates/sm-document" }
 sm-format = { path = "crates/sm-format" }
 sm-kernel = { path = "crates/sm-kernel" }
+sm-mesh = { path = "crates/sm-mesh" }
 sm-step = { path = "crates/sm-step" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
