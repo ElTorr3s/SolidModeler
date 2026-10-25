@@ -22,6 +22,7 @@ There is no GUI yet.
 | `crates/sm-kernel` | Replays the history into B-rep solids using [`truck`](https://github.com/ricosjp/truck) |
 | `crates/sm-format` | Reads and writes `.smp` files ([spec](docs/smp-format.md)) |
 | `crates/sm-step` | STEP export (geometry only) |
+| `crates/sm-sketch` | 2D sketch geometry and constraint solver (degrees of freedom, over-constraint detection) |
 | `apps/smcli` | Command-line driver until the GUI exists |
 
 ## Try it
