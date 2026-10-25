@@ -1,6 +1,5 @@
 //! 2D sketch loops: cleaning, validation, and grouping into regions with holes.
 
-use crate::LINEAR_TOLERANCE;
 use sm_document::Profile;
 
 pub type Point2 = [f64; 2];
@@ -29,11 +28,12 @@ pub struct Region {
 /// Cleans every loop, rejects bad geometry, and groups the loops into regions
 /// by nesting depth: a loop inside an odd number of others is a hole in its
 /// innermost container, as in Inventor's profile selection.
-pub fn regions(profiles: &[Profile]) -> Result<Vec<Region>, ProfileError> {
+/// `eps` is the linear tolerance in sketch units.
+pub fn regions(profiles: &[Profile], eps: f64) -> Result<Vec<Region>, ProfileError> {
     let loops = profiles
         .iter()
         .enumerate()
-        .map(|(i, p)| clean(i, &p.points))
+        .map(|(i, p)| clean(i, &p.points, eps))
         .collect::<Result<Vec<_>, _>>()?;
 
     let segments: Vec<_> = loops
@@ -42,7 +42,7 @@ pub fn regions(profiles: &[Profile]) -> Result<Vec<Region>, ProfileError> {
         .flat_map(|(l, points)| (0..points.len()).map(move |i| (l, edge(points, i))))
         .collect();
     let segs: Vec<_> = segments.iter().map(|&(_, seg)| seg).collect();
-    if let Some((a, b)) = touching_pair(&segs, |a, b| segments[a].0 == segments[b].0) {
+    if let Some((a, b)) = touching_pair(&segs, eps, |a, b| segments[a].0 == segments[b].0) {
         let (i, j) = (segments[a].0, segments[b].0);
         return Err(ProfileError::LoopsIntersect(i.min(j), i.max(j)));
     }
@@ -80,14 +80,14 @@ pub fn regions(profiles: &[Profile]) -> Result<Vec<Region>, ProfileError> {
 
 /// Drops repeated points (including a closing point equal to the first) and
 /// checks that what's left is a simple polygon with area.
-fn clean(index: usize, points: &[Point2]) -> Result<Vec<Point2>, ProfileError> {
+fn clean(index: usize, points: &[Point2], eps: f64) -> Result<Vec<Point2>, ProfileError> {
     let mut out: Vec<Point2> = Vec::with_capacity(points.len());
     for &p in points {
-        if out.last().is_none_or(|&q| dist(p, q) > LINEAR_TOLERANCE) {
+        if out.last().is_none_or(|&q| dist(p, q) > eps) {
             out.push(p);
         }
     }
-    while out.len() > 1 && dist(out[0], *out.last().unwrap()) <= LINEAR_TOLERANCE {
+    while out.len() > 1 && dist(out[0], *out.last().unwrap()) <= eps {
         out.pop();
     }
     if out.len() < 3 {
@@ -97,10 +97,10 @@ fn clean(index: usize, points: &[Point2]) -> Result<Vec<Point2>, ProfileError> {
     let segments: Vec<_> = (0..n).map(|i| edge(&out, i)).collect();
     // Neighbouring edges share an endpoint, so they always "touch".
     let adjacent = |a: usize, b: usize| a.abs_diff(b) == 1 || a.abs_diff(b) == n - 1;
-    if touching_pair(&segments, adjacent).is_some() {
+    if touching_pair(&segments, eps, adjacent).is_some() {
         return Err(ProfileError::SelfIntersecting(index));
     }
-    if signed_area(&out).abs() <= LINEAR_TOLERANCE * perimeter(&out) {
+    if signed_area(&out).abs() <= eps * perimeter(&out) {
         return Err(ProfileError::ZeroArea(index));
     }
     Ok(out)
@@ -146,9 +146,9 @@ fn dist(a: Point2, b: Point2) -> f64 {
 /// typical sketches instead of comparing every pair.
 fn touching_pair(
     segments: &[(Point2, Point2)],
+    tol: f64,
     skip: impl Fn(usize, usize) -> bool,
 ) -> Option<(usize, usize)> {
-    let tol = LINEAR_TOLERANCE;
     let bounds = |(a, b): (Point2, Point2)| {
         (
             a[0].min(b[0]),
@@ -169,7 +169,7 @@ fn touching_pair(
             if jy0 > y1 + tol || y0 > jy1 + tol || skip(i, j) {
                 continue;
             }
-            if segments_touch(segments[i], segments[j]) {
+            if segments_touch(segments[i], segments[j], tol) {
                 return Some((i, j));
             }
         }
@@ -190,7 +190,7 @@ fn contains(polygon: &[Point2], [x, y]: Point2) -> bool {
 }
 
 /// True if two closed segments intersect or come within tolerance.
-fn segments_touch((a, b): (Point2, Point2), (c, d): (Point2, Point2)) -> bool {
+fn segments_touch((a, b): (Point2, Point2), (c, d): (Point2, Point2), eps: f64) -> bool {
     let cross = |o: Point2, p: Point2, q: Point2| {
         (p[0] - o[0]) * (q[1] - o[1]) - (p[1] - o[1]) * (q[0] - o[0])
     };
@@ -199,10 +199,10 @@ fn segments_touch((a, b): (Point2, Point2), (c, d): (Point2, Point2)) -> bool {
     if d1 * d2 < 0.0 && d3 * d4 < 0.0 {
         return true;
     }
-    point_segment_dist(c, a, b) <= LINEAR_TOLERANCE
-        || point_segment_dist(d, a, b) <= LINEAR_TOLERANCE
-        || point_segment_dist(a, c, d) <= LINEAR_TOLERANCE
-        || point_segment_dist(b, c, d) <= LINEAR_TOLERANCE
+    point_segment_dist(c, a, b) <= eps
+        || point_segment_dist(d, a, b) <= eps
+        || point_segment_dist(a, c, d) <= eps
+        || point_segment_dist(b, c, d) <= eps
 }
 
 fn point_segment_dist(p: Point2, a: Point2, b: Point2) -> f64 {
@@ -219,6 +219,8 @@ fn point_segment_dist(p: Point2, a: Point2, b: Point2) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const EPS: f64 = 1e-6;
 
     fn square(x: f64, y: f64, size: f64) -> Profile {
         Profile {
@@ -238,7 +240,7 @@ mod tests {
                 [0.0, 0.0],
             ],
         };
-        let r = regions(&[p]).unwrap();
+        let r = regions(&[p], EPS).unwrap();
         assert_eq!(r[0].outer.len(), 4);
     }
 
@@ -247,17 +249,20 @@ mod tests {
         let line = Profile {
             points: vec![[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]],
         };
-        assert_eq!(regions(&[line]), Err(ProfileError::ZeroArea(0)));
+        assert_eq!(regions(&[line], EPS), Err(ProfileError::ZeroArea(0)));
         let bow_tie = Profile {
             points: vec![[0.0, 0.0], [1.0, 1.0], [1.0, 0.0], [0.0, 1.0]],
         };
-        assert_eq!(regions(&[bow_tie]), Err(ProfileError::SelfIntersecting(0)));
+        assert_eq!(
+            regions(&[bow_tie], EPS),
+            Err(ProfileError::SelfIntersecting(0))
+        );
         let two = Profile {
             points: vec![[0.0, 0.0], [1.0, 0.0]],
         };
-        assert_eq!(regions(&[two]), Err(ProfileError::TooFewPoints(0)));
+        assert_eq!(regions(&[two], EPS), Err(ProfileError::TooFewPoints(0)));
         assert_eq!(
-            regions(&[square(0.0, 0.0, 2.0), square(1.0, 1.0, 2.0)]),
+            regions(&[square(0.0, 0.0, 2.0), square(1.0, 1.0, 2.0)], EPS),
             Err(ProfileError::LoopsIntersect(0, 1))
         );
     }
@@ -274,7 +279,7 @@ mod tests {
                 .collect(),
         };
         let start = std::time::Instant::now();
-        let r = regions(&[circle(10.0), circle(5.0)]).unwrap();
+        let r = regions(&[circle(10.0), circle(5.0)], EPS).unwrap();
         assert_eq!(r[0].holes.len(), 1);
         // Pairwise checks took seconds here; the sweep takes milliseconds.
         assert!(start.elapsed().as_secs_f64() < 1.0, "{:?}", start.elapsed());
@@ -283,12 +288,15 @@ mod tests {
     #[test]
     fn nested_loops_become_holes_and_islands() {
         // Frame with an island inside the hole, plus a separate square.
-        let r = regions(&[
-            square(0.0, 0.0, 10.0),
-            square(2.0, 2.0, 6.0),
-            square(4.0, 4.0, 2.0),
-            square(20.0, 0.0, 1.0),
-        ])
+        let r = regions(
+            &[
+                square(0.0, 0.0, 10.0),
+                square(2.0, 2.0, 6.0),
+                square(4.0, 4.0, 2.0),
+                square(20.0, 0.0, 1.0),
+            ],
+            EPS,
+        )
         .unwrap();
         assert_eq!(r.len(), 3);
         assert_eq!(r[0].holes.len(), 1);
