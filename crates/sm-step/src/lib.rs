@@ -20,7 +20,10 @@ pub fn export(model: &Model, file_name: &str) -> String {
         .iter()
         .map(|b| {
             // truck-stepio miswrites intersection curves; see sm_kernel::curves.
-            let solid = sm_kernel::curves::without_intersection_curves(&b.solid);
+            let solid = sm_kernel::curves::without_intersection_curves(
+                &b.solid,
+                sm_kernel::Tolerance::for_units(model.units),
+            );
             if scale == 1.0 {
                 solid.compress()
             } else {
@@ -54,7 +57,7 @@ pub fn export(model: &Model, file_name: &str) -> String {
 }
 
 /// Encodes text for a Part 21 string literal: quotes and backslashes are
-/// doubled, and anything outside printable ASCII uses the `\X2\` escape.
+/// doubled, and anything outside printable ASCII uses the `\X2\` escape (`\X4\` beyond the BMP).
 fn step_string(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
@@ -62,13 +65,10 @@ fn step_string(text: &str) -> String {
             '\'' => out.push_str("''"),
             '\\' => out.push_str("\\\\"),
             ' '..='~' => out.push(c),
-            _ => {
-                out.push_str("\\X2\\");
-                for unit in c.encode_utf16(&mut [0; 2]) {
-                    out.push_str(&format!("{unit:04X}"));
-                }
-                out.push_str("\\X0\\");
+            c if (c as u32) <= 0xFFFF => {
+                out.push_str(&format!("\\X2\\{:04X}\\X0\\", c as u32));
             }
+            _ => out.push_str(&format!("\\X4\\{:08X}\\X0\\", c as u32)),
         }
     }
     out
@@ -195,8 +195,10 @@ mod tests {
 
     #[test]
     fn header_is_escaped_and_standard() {
-        let step = export(&block(LengthUnit::Mm), "Bob's part ø.step");
-        assert!(step.contains("FILE_NAME('Bob''s part \\X2\\00F8\\X0\\.step', '20"));
+        let step = export(&block(LengthUnit::Mm), "Bob's part ø🔩.step");
+        assert!(
+            step.contains("FILE_NAME('Bob''s part \\X2\\00F8\\X0\\\\X4\\0001F529\\X0\\.step', '20")
+        );
         assert!(step.contains("FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));"));
         assert!(step.is_ascii());
     }
