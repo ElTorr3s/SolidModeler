@@ -10,9 +10,9 @@ system theme.
 
 ## Status
 
-Step 1 of the [roadmap](docs/roadmap.md): the workspace, the feature history
-model, the `.smp` file format, and a minimal sketch → extrude → STEP pipeline.
-There is no GUI yet.
+Step 2 of the [roadmap](docs/roadmap.md): polyline sketches (with holes)
+extruded with Join / Cut / Intersect / New Solid, saved as `.smp`, and
+exported to STEP. There is no GUI yet.
 
 ## Layout
 
@@ -28,6 +28,6 @@ There is no GUI yet.
 
 ```sh
 cargo test
-cargo run -p smcli -- demo block.smp            # 40×20×10 mm block
+cargo run -p smcli -- demo block.smp            # block with a pocket and a notch
 cargo run -p smcli -- rebuild block.smp block.step
 ```

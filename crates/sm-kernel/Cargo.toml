@@ -3,12 +3,22 @@ name = "sm-kernel"
 description = "Replays a part's feature history into B-rep solids using truck"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 sm-document.workspace = true
 thiserror.workspace = true
 truck-modeling.workspace = true
+truck-shapeops.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+sm-testkit = { workspace = true, features = ["proptest"] }
 truck-topology = "0.6"
+
+[[bench]]
+name = "rebuild"
+harness = false

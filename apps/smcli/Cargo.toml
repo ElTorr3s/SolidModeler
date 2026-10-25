@@ -3,7 +3,9 @@ name = "smcli"
 description = "Command-line driver for SolidModeller until the GUI exists"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 sm-document.workspace = true

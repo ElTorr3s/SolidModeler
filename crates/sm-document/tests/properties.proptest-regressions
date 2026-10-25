@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 46d97b4d801c85ef74f1bfc9e0056212f2d3ff324ee0343b4197dd05521263cd # shrinks to doc = PartDocument { name: "Generated", units: Mm, parameters: [], features: [Feature { id: FeatureId(1), name: "Sketch1", suppressed: false, kind: Sketch(Sketch { plane: XY, offset: 0.0, profiles: [Profile { points: [[0.0, 45.423177835585804]] }] }) }], end_of_part: None, next_id: 2 }

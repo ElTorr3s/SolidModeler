@@ -1,21 +1,43 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "apps/*"]
+# Fuzz targets need nightly and libFuzzer; build them with `cargo fuzz`.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+# Checked in CI (msrv job). Raise it deliberately, not by accident.
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/eltorr3s/solidmodeler"
+# An application, not a library collection: nothing goes to crates.io.
+publish = false
 
 [workspace.dependencies]
 sm-document = { path = "crates/sm-document" }
 sm-format = { path = "crates/sm-format" }
 sm-kernel = { path = "crates/sm-kernel" }
 sm-step = { path = "crates/sm-step" }
+sm-testkit = { path = "crates/sm-testkit" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# float_roundtrip: the default parser can be off by one ulp, which would
+# silently move geometry on every save and reopen.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "2"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 truck-modeling = "0.6"
 truck-stepio = "0.3"
+truck-shapeops = "0.4"
+
+# Test and benchmark tooling.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+proptest = "1"
+
+# truck is slow unoptimised; optimise dependencies even in dev builds.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

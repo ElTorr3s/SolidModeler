@@ -1,0 +1,15 @@
+[package]
+name = "sm-testkit"
+description = "Generated parts and proptest strategies shared by tests, benchmarks and fuzzers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+sm-document.workspace = true
+proptest = { workspace = true, optional = true }
+
+[features]
+proptest = ["dep:proptest"]

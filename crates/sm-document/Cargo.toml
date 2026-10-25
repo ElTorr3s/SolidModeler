@@ -3,11 +3,15 @@ name = "sm-document"
 description = "Parametric part document: parameters and the ordered feature history"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
+sm-testkit = { workspace = true, features = ["proptest"] }
 serde_json.workspace = true
