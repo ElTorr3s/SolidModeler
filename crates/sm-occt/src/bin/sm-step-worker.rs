@@ -28,6 +28,9 @@ fn main() -> ExitCode {
 
 fn run() -> Result<Vec<u8>, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--sandbox-self-test") {
+        return self_test();
+    }
     let [memory, cpu, max_bodies] = args.as_slice() else {
         return Err("usage: sm-step-worker <memory bytes> <cpu seconds> <max bodies>".into());
     };
@@ -52,4 +55,46 @@ fn run() -> Result<Vec<u8>, String> {
         return Err("input too large".into());
     }
     sm_occt::step::worker_read(&input, max_bodies).map_err(|e| e.to_string())
+}
+
+/// Locks down, then checks that what the sandbox must forbid fails and
+/// what the reader needs still works. Used by the test suite.
+fn self_test() -> Result<Vec<u8>, String> {
+    sm_occt::step::worker_warm_up().map_err(|e| format!("warm-up: {e}"))?;
+    sm_occt::sandbox::lock_down(&WorkerLimits::default()).map_err(|e| format!("sandbox: {e}"))?;
+    let mut report = Vec::new();
+    let mut check = |name: &str, allowed: bool| {
+        report.push(format!(
+            "{name}={}",
+            if allowed { "allowed" } else { "denied" }
+        ))
+    };
+    check(
+        "read_file",
+        std::fs::read("/etc/hostname").is_ok() || std::fs::read("/proc/self/status").is_ok(),
+    );
+    check("list_dir", std::fs::read_dir("/").is_ok());
+    check(
+        "write_file",
+        std::fs::write("/tmp/sm-step-worker-self-test", b"x").is_ok(),
+    );
+    check(
+        "exec",
+        std::process::Command::new("/bin/true").status().is_ok(),
+    );
+    check(
+        "socket",
+        std::net::TcpStream::connect("127.0.0.1:9").is_ok()
+            || std::net::UdpSocket::bind("127.0.0.1:0").is_ok(),
+    );
+    check("thread", std::thread::spawn(|| 1).join().is_ok());
+    check("allocate", {
+        let v = vec![1u8; 64 << 20];
+        v[v.len() - 1] == 1
+    });
+    let cube = sm_occt::make_box(1.0, 1.0, 1.0)
+        .and_then(|b| b.to_brep())
+        .is_ok();
+    check("occt", cube);
+    Ok(report.join("\n").into_bytes())
 }

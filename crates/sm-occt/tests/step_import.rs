@@ -223,3 +223,33 @@ fn export_then_import_round_trips() {
     assert!((v0 - v1).abs() < 1e-6 * v0, "{v0} vs {v1}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn sandbox_blocks_files_processes_and_network() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_sm-step-worker"))
+        .arg("--sandbox-self-test")
+        .env_clear()
+        .output()
+        .unwrap();
+    let report = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{report} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for line in [
+        "read_file=denied",
+        "list_dir=denied",
+        "write_file=denied",
+        "exec=denied",
+        "socket=denied",
+        "thread=allowed",
+        "allocate=allowed",
+        "occt=allowed",
+    ] {
+        assert!(
+            report.lines().any(|l| l == line),
+            "expected {line} in:\n{report}"
+        );
+    }
+}

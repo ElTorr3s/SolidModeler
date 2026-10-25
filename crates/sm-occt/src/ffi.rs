@@ -1,6 +1,7 @@
 //! The raw cxx bridge. Everything here is wrapped by safe types in the
 //! crate root; nothing outside this crate sees these items.
 
+#[allow(clippy::module_inception)]
 #[cxx::bridge(namespace = "smocct")]
 pub(crate) mod ffi {
     /// One history record: argument `arg`'s sub-shape (`kind`, `index`)
