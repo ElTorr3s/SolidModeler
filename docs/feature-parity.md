@@ -28,7 +28,7 @@ summary with `python3 docs/parity-summary.py`.
 | 2 | Kernel core: booleans, more surface types, STEP import, AP242 |
 | 3 | Sketcher, parameters, first features, rollback and edit-in-place |
 | 4 | Viewer and UI on Omarchy |
-| 5 | *Proposed:* local version management: continuous history, versions, branches, merge, compare (Onshape-style, no cloud) |
+| 5 | Versions and the project store: continuous history, versions, branches, merge, compare (Onshape-style, local, no cloud) |
 | 6 | *Proposed:* rest of part modeling (work features, patterns, sweeps, lofts, shell, properties, materials) |
 | 7 | *Proposed:* assemblies, cross-document references, release management |
 | 8 | *Proposed:* drawings and model-based definition |
@@ -36,8 +36,8 @@ summary with `python3 docs/parity-summary.py`.
 | 10 | *Proposed:* advanced modeling: surfacing, freeform, plastic part, rules and automation, table-driven families, weldments and frames |
 | 11 | *Proposed:* add-ins and analysis: standard parts libraries, design accelerators, simulation, routing, presentations |
 
-Steps 5 to 11 are a suggested order only; the roadmap itself lists steps 1
-to 4.
+Step 5 follows decision 14 in [decisions.md](decisions.md). Steps 6 to 11
+are a suggested order only.
 
 **Status** is one of:
 
