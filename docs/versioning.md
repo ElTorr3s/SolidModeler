@@ -30,7 +30,10 @@ A part's history is a graph of versions. Each version holds:
   shows the first 8).
 
 Objects are stored once, named by the BLAKE3 hash of their canonical JSON
-(compact, keys sorted). A version that changes one extrusion depth adds one
+(compact, keys sorted explicitly by the writer, so the result doesn't depend
+on serde_json build features). A golden-hash test pins the hash of a fixed
+document, so any change to field names, float formatting or ordering is
+caught before it silently breaks deduplication. A version that changes one extrusion depth adds one
 small object; the header and every other feature are shared with its parent.
 This is git's tree structure, and the project store uses the same objects.
 
@@ -96,15 +99,17 @@ never older than necessary.
   followed on that side. When both sides added features at the same place,
   the side whose order was used comes first (ours, unless only they
   reordered).
-- **Feature ids across branches:** every branch of a history hands out
+- **Feature ids across branches (interim):** every branch of a history hands out
   feature ids from one shared counter (the history raises the open
   document's counter on checkout and merge), so two branches never give
   different features the same id, and merging the same branch again later
   stays correct. A part edited outside its history (for example two copies of
   a file) can still collide; then their side's feature gets a fresh id and
   their references are rewritten, and the result lists every renumbering.
-  Decision D1 replaces counter ids with random UUIDv7 ids, after which
-  renumbering is removed entirely. Two identical additions count as one.
+  This is only safe within one history: two copies of a file (or of a
+  project store) each continue the counter and reuse ids. Decision D1
+  (schema foundations) replaces counter ids with random UUIDv7 ids, after
+  which the shared counter and renumbering are removed entirely. Two identical additions count as one.
 
 A **conflict** is a value changed differently on both sides, a feature
 deleted on one side and changed on the other, both sides reordering

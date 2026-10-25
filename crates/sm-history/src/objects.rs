@@ -57,6 +57,48 @@ impl fmt::Display for Hash {
     }
 }
 
+/// Canonical JSON text: compact, object keys sorted by their UTF-8 bytes,
+/// so equal values always hash the same. Keys are sorted here rather than
+/// relying on `serde_json::Map`'s order, which changes if any crate in the
+/// build enables serde_json's `preserve_order` feature.
+pub(crate) fn canonical_json(value: &serde_json::Value) -> String {
+    let mut out = String::new();
+    write_canonical(value, &mut out);
+    out
+}
+
+fn write_canonical(value: &serde_json::Value, out: &mut String) {
+    use serde_json::Value;
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+            out.push('{');
+            for (i, (key, value)) in entries.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&Value::String(key.clone()).to_string());
+                out.push(':');
+                write_canonical(value, out);
+            }
+            out.push('}');
+        }
+        Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_canonical(item, out);
+            }
+            out.push(']');
+        }
+        // Strings, numbers, booleans and null print the same in any order.
+        scalar => out.push_str(&scalar.to_string()),
+    }
+}
+
 /// The object store: hash to canonical JSON text.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Objects(BTreeMap<Hash, Box<RawValue>>);
@@ -86,10 +128,7 @@ impl Objects {
     /// Stores `value` and returns its hash. Storing the same value twice
     /// stores it once.
     pub fn put<T: Serialize>(&mut self, value: &T) -> Result<Hash, HistoryError> {
-        // Canonical text: compact, with object keys sorted (serde_json's
-        // Value orders them), so equal values always hash the same.
-        let canonical = serde_json::to_value(value).expect("documents serialize");
-        let text = canonical.to_string();
+        let text = canonical_json(&serde_json::to_value(value).expect("documents serialize"));
         let hash = Hash::of(text.as_bytes());
         match self.0.get(&hash) {
             None => {

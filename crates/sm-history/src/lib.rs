@@ -653,7 +653,7 @@ fn record_id(parents: &[VersionId], message: &str, time: u64, tree: &Tree) -> Ve
         time,
         tree,
     };
-    let text = serde_json::to_string(&record).expect("serializable");
+    let text = objects::canonical_json(&serde_json::to_value(&record).expect("serializable"));
     VersionId(Hash::of(text.as_bytes()))
 }
 

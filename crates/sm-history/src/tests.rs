@@ -939,3 +939,40 @@ fn migration_upgrades_every_version() {
     let err = h.migrate_documents(|_| Err("unsupported")).unwrap_err();
     assert!(err.to_string().contains("unsupported"), "{err}");
 }
+
+#[test]
+fn canonical_json_sorts_keys_at_every_level() {
+    let value =
+        serde_json::json!({"b": 1, "a": {"d": [true, null, {"z": 1.5, "y": "x\""}], "c": -0.0}});
+    assert_eq!(
+        objects::canonical_json(&value),
+        r#"{"a":{"c":-0.0,"d":[true,null,{"y":"x\"","z":1.5}]},"b":1}"#
+    );
+}
+
+/// Pins the hash of a fixed document. If this changes, every stored object
+/// and version id changes with it and deduplication against existing files
+/// breaks: a field rename, a different float format or key order all show
+/// up here. Change the expected value only together with a format version.
+#[test]
+fn object_hashes_are_stable() {
+    let mut doc = block();
+    doc.parameters.push(Parameter {
+        name: "width".into(),
+        value: 40.5,
+        comment: "overall".into(),
+    });
+    let h = History::new(&doc, "Initial", 1_700_000_000).unwrap();
+    let v = h.head_version();
+    // The exact canonical text of Extrusion1, written out by hand.
+    let text = r#"{"id":2,"kind":{"extent":{"distance":10.0,"type":"distance"},"operation":"join","sketch":1,"type":"extrude"},"name":"Extrusion1","suppressed":false}"#;
+    assert_eq!(v.tree.features[1], Hash::of(text.as_bytes()));
+    assert_eq!(
+        v.tree.features[1].as_str(),
+        "0dfca8b34eb1065a7bde232b4e9dacf87bb7ab3f16d6984dd5f64cdaf1541b5f"
+    );
+    assert_eq!(
+        v.id.as_str(),
+        "dcbebd7639489fe3402a0e057a3f4719f4cb07142ffbc060f227a738d4bd63bf"
+    );
+}
