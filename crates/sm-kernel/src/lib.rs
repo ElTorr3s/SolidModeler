@@ -56,6 +56,12 @@ pub const MAX_SKETCH_POINTS: usize = 10_000;
 pub const MAX_BODIES: usize = 500;
 /// Total extruded regions per rebuild, each of which costs a boolean.
 pub const MAX_TOOLS: usize = 2_000;
+/// Total faces across all bodies. Every face costs memory and meshing time
+/// in every later feature; a detailed real part has a few thousand.
+pub const MAX_FACES: usize = 200_000;
+/// Work units charged per sketch point of each extruded region: building the
+/// tool makes a side face per point, and classifying it meshes them all.
+const REGION_POINT_COST: u64 = 10;
 /// Total geometry work per rebuild. Meshing costs one unit per face; a truck
 /// boolean costs the square of the faces involved, because its run time grows
 /// that fast or faster. This allows roughly 30 s of booleans (about a
@@ -130,12 +136,14 @@ pub enum RebuildError {
     NoTargetBody(FeatureId, BodyOperation),
     #[error("feature {0:?}: boolean operation failed")]
     BooleanFailed(FeatureId),
-    #[error("feature {0:?}: intersect leaves nothing of the part")]
+    #[error("feature {0:?}: the operation leaves nothing of the part")]
     EmptyResult(FeatureId),
     #[error("feature {0:?}: part has more than {MAX_BODIES} bodies")]
     TooManyBodies(FeatureId),
     #[error("feature {0:?}: rebuild needs more than {MAX_TOOLS} extruded regions")]
     TooManyTools(FeatureId),
+    #[error("feature {0:?}: part has more than {MAX_FACES} faces")]
+    TooManyFaces(FeatureId),
     #[error("feature {0:?}: rebuild exceeds its work budget")]
     TooMuchWork(FeatureId),
     #[error("rebuild cancelled")]
@@ -212,14 +220,20 @@ pub fn rebuild_with(doc: &PartDocument, budget: &Budget) -> Result<Model, Rebuil
                         .collect(),
                     _ => Vec::new(),
                 };
-                let cx = boolean::Ctx { id, tol, budget };
+                let meshes = boolean::MeshCache::default();
+                let cx = boolean::Ctx {
+                    id,
+                    tol,
+                    budget,
+                    meshes: &meshes,
+                };
                 let slab_ok =
                     |slab: &Solid| boolean::slab_ok(cx, &model.bodies, slab, extrude.operation);
                 let mut solids = Vec::with_capacity(regions.len());
                 for region in regions.iter() {
                     let points: usize =
                         region.outer.len() + region.holes.iter().map(Vec::len).sum::<usize>();
-                    budget.spend(id, points as u64 + 2)?;
+                    budget.spend(id, (points as u64 + 2) * REGION_POINT_COST)?;
                     let solid = extrude::tool(
                         &frame,
                         region,
@@ -244,11 +258,7 @@ pub fn rebuild_with(doc: &PartDocument, budget: &Budget) -> Result<Model, Rebuil
                             boolean::join(cx, &mut model, solid)?;
                         }
                     }
-                    BodyOperation::Cut => {
-                        for solid in solids {
-                            boolean::cut(cx, &mut model, solid)?;
-                        }
-                    }
+                    BodyOperation::Cut => boolean::cut(cx, &mut model, &solids)?,
                     BodyOperation::Intersect => boolean::intersect(cx, &mut model, &solids)?,
                 }
             }
@@ -639,8 +649,29 @@ mod tests {
     }
 
     #[test]
-    fn cut_swallowing_the_body_removes_it() {
+    fn cut_swallowing_a_body_removes_it() {
         let mut doc = base_block();
+        let mut swallowed = doc.clone();
+        add_block(
+            &mut swallowed,
+            [-5.0, -5.0, 45.0, 25.0],
+            -5.0,
+            20.0,
+            BodyOperation::Cut,
+        );
+        // Removing the whole part is an error, as in Inventor.
+        assert!(matches!(
+            rebuild(&swallowed),
+            Err(RebuildError::EmptyResult(_))
+        ));
+        // Removing one of two bodies is fine.
+        add_block(
+            &mut doc,
+            [100.0, 0.0, 110.0, 10.0],
+            0.0,
+            10.0,
+            BodyOperation::NewBody,
+        );
         add_block(
             &mut doc,
             [-5.0, -5.0, 45.0, 25.0],
@@ -648,7 +679,47 @@ mod tests {
             20.0,
             BodyOperation::Cut,
         );
-        assert!(rebuild(&doc).unwrap().bodies.is_empty());
+        let model = rebuild_ok(&doc);
+        assert_eq!(model.bodies.len(), 1);
+        assert_eq!(volume(&model), 1000.0);
+    }
+
+    #[test]
+    fn detailed_regions_are_charged_for_their_faces() {
+        // Many New Solid extrusions of a 9,999-point circle: each builds a
+        // 10k-face solid, so they must hit a limit quickly.
+        let n = MAX_SKETCH_POINTS - 1;
+        let circle: Vec<[f64; 2]> = (0..n)
+            .map(|i| {
+                let a = i as f64 / n as f64 * std::f64::consts::TAU;
+                [5.0 * a.cos(), 5.0 * a.sin()]
+            })
+            .collect();
+        let mut doc = PartDocument::new("T", LengthUnit::Mm);
+        let sketch = doc.add_feature(
+            "S",
+            FeatureKind::Sketch(Sketch {
+                plane: OriginPlane::XY,
+                offset: 0.0,
+                profiles: vec![Profile { points: circle }],
+            }),
+        );
+        for i in 0..500 {
+            doc.add_feature(
+                format!("E{i}"),
+                FeatureKind::Extrude(Extrude {
+                    sketch,
+                    extent: ExtrudeExtent::Distance { distance: 1.0 },
+                    operation: BodyOperation::NewBody,
+                }),
+            );
+        }
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            rebuild(&doc),
+            Err(RebuildError::TooMuchWork(_) | RebuildError::TooManyFaces(_))
+        ));
+        assert!(started.elapsed().as_secs() < 30, "{:?}", started.elapsed());
     }
 
     #[test]

@@ -12,10 +12,13 @@
 //! - splits truck's results back into separate bodies when a cut breaks a
 //!   body in two.
 
-use crate::{curves, Body, Budget, Model, RebuildError, Tolerance, MAX_BODIES};
+use crate::{curves, Body, Budget, Model, RebuildError, Tolerance, MAX_BODIES, MAX_FACES};
 use sm_document::{BodyOperation, FeatureId};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use truck_meshalgo::prelude::*;
-use truck_modeling::{Point3, Solid};
+use truck_modeling::{Point3, Solid, Surface};
 
 /// How a tool shell sits relative to a body shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,12 +54,13 @@ impl Piece {
 }
 
 /// What every operation in one feature needs: who to blame, the part's
-/// tolerances, and the rebuild's work budget.
+/// tolerances, the rebuild's work budget, and the feature's mesh cache.
 #[derive(Clone, Copy)]
 pub struct Ctx<'a> {
     pub id: FeatureId,
     pub tol: Tolerance,
     pub budget: &'a Budget,
+    pub meshes: &'a MeshCache,
 }
 
 struct Meshed {
@@ -65,9 +69,32 @@ struct Meshed {
     max: Point3,
 }
 
-fn meshed(cx: Ctx, solid: &Solid) -> Result<Meshed, RebuildError> {
-    let faces: usize = solid.boundaries().iter().map(|s| s.len()).sum();
-    cx.budget.spend(cx.id, faces as u64)?;
+/// Faces (by identity) and their orientations: two solids with the same key
+/// have the same boundary, so they mesh the same.
+type SolidKey = Vec<(truck_topology::FaceID<Surface>, bool)>;
+
+/// Meshes of the solids one feature has already classified. The same body
+/// is compared against every region and slab of a feature, and meshing it
+/// is the expensive part, so each solid is meshed once. Entries keep their
+/// solid alive, so a face's identity can't be reused while it is cached.
+#[derive(Default)]
+pub struct MeshCache(RefCell<HashMap<SolidKey, (Solid, Rc<Meshed>)>>);
+
+fn key(solid: &Solid) -> SolidKey {
+    solid
+        .boundaries()
+        .iter()
+        .flat_map(|shell| shell.face_iter())
+        .map(|f| (f.id(), f.orientation()))
+        .collect()
+}
+
+fn meshed(cx: Ctx, solid: &Solid) -> Result<Rc<Meshed>, RebuildError> {
+    let key = key(solid);
+    if let Some((_, m)) = cx.meshes.0.borrow().get(&key) {
+        return Ok(m.clone());
+    }
+    cx.budget.spend(cx.id, key.len() as u64)?;
     let mesh = solid.triangulation(cx.tol.boolean).to_polygon();
     let mut min = Point3::new(f64::MAX, f64::MAX, f64::MAX);
     let mut max = Point3::new(f64::MIN, f64::MIN, f64::MIN);
@@ -77,7 +104,12 @@ fn meshed(cx: Ctx, solid: &Solid) -> Result<Meshed, RebuildError> {
             max[k] = max[k].max(p[k]);
         }
     }
-    Ok(Meshed { mesh, min, max })
+    let m = Rc::new(Meshed { mesh, min, max });
+    cx.meshes
+        .0
+        .borrow_mut()
+        .insert(key, (solid.clone(), m.clone()));
+    Ok(m)
 }
 
 fn relation(cx: Ctx, body: &Solid, tool: &Solid) -> Result<Relation, RebuildError> {
@@ -293,6 +325,13 @@ fn push_pieces(
         if model.bodies.len() >= MAX_BODIES {
             return Err(RebuildError::TooManyBodies(id));
         }
+        let faces = |s: &Solid| s.boundaries().iter().map(|sh| sh.len()).sum::<usize>();
+        let total = model.bodies.iter().map(|b| faces(&b.solid)).sum::<usize>()
+            + faces(&piece.outer)
+            + piece.voids.iter().map(faces).sum::<usize>();
+        if total > MAX_FACES {
+            return Err(RebuildError::TooManyFaces(id));
+        }
         model.bodies.push(Body {
             feature,
             solid: piece.solid(),
@@ -369,10 +408,11 @@ pub fn join(cx: Ctx, model: &mut Model, tool: Solid) -> Result<(), RebuildError>
     Ok(())
 }
 
-/// Cut: removes the tool's volume from every body. Bodies the tool misses
-/// are unchanged, bodies it swallows disappear, a tool fully inside a body
-/// leaves a hollow, and a body cut in two becomes two bodies.
-pub fn cut(cx: Ctx, model: &mut Model, tool: Solid) -> Result<(), RebuildError> {
+/// Cut: removes the tools' volume (a feature's separate regions) from every
+/// body. Bodies the tools miss are unchanged, bodies they swallow disappear,
+/// a tool fully inside a body leaves a hollow, and a body cut in two becomes
+/// two bodies. Fails if nothing is left.
+pub fn cut(cx: Ctx, model: &mut Model, tools: &[Solid]) -> Result<(), RebuildError> {
     let id = cx.id;
     if model.bodies.is_empty() {
         return Err(RebuildError::NoTargetBody(id, BodyOperation::Cut));
@@ -380,9 +420,13 @@ pub fn cut(cx: Ctx, model: &mut Model, tool: Solid) -> Result<(), RebuildError> 
     for body in std::mem::take(&mut model.bodies) {
         let feature = body.feature;
         for piece in pieces_of(cx, &body)? {
-            let pieces = cut_piece(cx, piece, std::slice::from_ref(&tool))?;
+            let pieces = cut_piece(cx, piece, tools)?;
             push_pieces(model, id, feature, pieces)?;
         }
+    }
+    // As in Inventor, a cut may remove some bodies but not the whole part.
+    if model.bodies.is_empty() {
+        return Err(RebuildError::EmptyResult(id));
     }
     Ok(())
 }

@@ -11,6 +11,4 @@ thiserror.workspace = true
 truck-modeling.workspace = true
 truck-shapeops.workspace = true
 truck-meshalgo = { version = "0.4", default-features = false, features = ["tessellation", "analyzers"] }
-
-[dev-dependencies]
 truck-topology = "0.6"
