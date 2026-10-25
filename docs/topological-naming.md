@@ -107,10 +107,15 @@ rebuild asserts that list is empty. If a kernel change ever merges or
 rebuilds surfaces (for example a coplanar-face clean-up), the tests fail
 loudly instead of references quietly going wrong.
 
-`sm_kernel::rebuild_observed` reports each tool and each body change to a
-`RebuildObserver`. The `sm-naming` tracker carries a `surface → origin` map
-per body through the whole history. The kernel's plain `rebuild()` is
-unchanged and passes a no-op observer.
+`sm_kernel::rebuild_observed` reports each tool a feature builds, then the
+part's bodies once the feature is done, to a `RebuildObserver`. The kernel
+applies a feature to every body and splits a body that a cut breaks in two,
+so the `sm-naming` tracker carries a `surface → origin` map from all the
+old bodies and the feature's tools into the new bodies. Bodies the feature
+didn't touch are reused as they are. Fragments of one face can therefore
+end up in different bodies, so names are disambiguated across the whole
+part, not per body. The kernel's plain `rebuild()` is unchanged and passes
+a no-op observer.
 
 ### 3. Split faces: told apart by neighbours
 
@@ -198,11 +203,11 @@ versioning layer rebuilds with `rebuild_named` and turns any `Ambiguous` or
   works with truck unmodified. If we later fork truck or move to a kernel
   with attribute propagation, only `FaceOrigins::carried` changes. The names
   stay the same.
-- **History as a change log.** `NamedRebuild` logs each body change (one
-  per boolean) rather than copying every body after every feature, and
-  `naming_before` replays the log. Memory grows with the number of booleans,
-  which the kernel already caps (`MAX_TOOLS`). The incremental rebuilder
-  should own this cache later.
+- **Shared per-feature states.** `NamedRebuild` keeps the bodies after each
+  feature for `naming_before`. Bodies a feature didn't touch are shared
+  (`Arc`) between states, so each state costs one pointer per body plus the
+  bodies that feature changed. The incremental rebuilder should own this
+  cache later.
 
 ## Decided since the first draft
 
