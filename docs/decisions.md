@@ -11,7 +11,7 @@ independent agents (a CAD kernel engineer, an Inventor/Vault/Onshape power user,
 systems architect, a local-first data expert, and a devil's advocate), plus the four
 standing reviewers (Sentinel for security, Bolt for performance, Hawk for bugs, Sage
 for the global review). Oracle made the final call. **Master can override any of
-these.** The ones most worth a look are marked ⚑.
+these.** The ones still waiting for his check are marked ⚑.
 
 The yardstick for every decision is Master's vision: *Inventor-style modeling, with
 Onshape's file and version management, running locally on Omarchy instead of in the
@@ -21,7 +21,7 @@ cloud*, for professional use, with no mistakes.
 
 | # | Decision | Vote | Undo cost |
 |---|---|---|---|
-| 1 ⚑ | Kernel: OpenCASCADE behind our own Rust kernel facade, replacing truck | 9-0 | Medium. The facade keeps the rest of the code backend-neutral |
+| 1 | Kernel: OpenCASCADE behind our own Rust kernel facade, replacing truck (confirmed by Master) | 9-0 | Medium. The facade keeps the rest of the code backend-neutral |
 | 2 | Working format: a local project store, not one zip per part | 9-0 | High after real projects exist; free today |
 | 3 | `.smp`, `.sma`, `.smd` become single-document packages for exchange and Pack and Go | 8-1 on per-kind extensions | Low |
 | 4 | Store layout: content-addressed canonical JSON with an edit log; SQLite only as a cache | 8-1 over SQLite | Medium |
@@ -45,7 +45,9 @@ are cheap to reverse.
 
 ---
 
-## 1. Kernel: OpenCASCADE behind our own Rust facade ⚑
+## 1. Kernel: OpenCASCADE behind our own Rust facade
+
+**Status.** Confirmed by Master on 2026-10-25 ("Yes, OpenCASCADE").
 
 **Decision.** sm-kernel's public API exposes only SolidModeller's own types: bodies,
 face, edge and vertex handles that carry persistent names, meshes, and mass properties.
@@ -72,9 +74,10 @@ Rust.
   and in the store, because two OCCT versions can rebuild a part slightly differently.
 - **Transition.** New truck-specific work stopped tonight. The facade and the OCCT
   backend are being built now, and new features target the facade. truck stays as the
-  working backend until OCCT passes the regression suite and Master confirms. Then truck
-  is removed. Until Master confirms, no PR may remove truck or make OCCT the default
-  backend. Both backends must pass one shared test suite through the facade (Sage).
+  working backend until OCCT passes the regression suite. Master confirmed the switch on
+  2026-10-25, so OCCT may now become the default backend, and truck is removed in the
+  PR where the OCCT backend passes the shared regression suite through the facade
+  (Sage). No PR removes truck before that suite is green on OCCT.
 
 **Why.** Inventor parity needs fillets, chamfers, shells, drafts and booleans that are
 exact when faces are coplanar. truck has none of the blends in any release, and its last
