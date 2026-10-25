@@ -73,7 +73,8 @@ Rust.
 - **Transition.** New truck-specific work stopped tonight. The facade and the OCCT
   backend are being built now, and new features target the facade. truck stays as the
   working backend until OCCT passes the regression suite and Master confirms. Then truck
-  is removed.
+  is removed. Until Master confirms, no PR may remove truck or make OCCT the default
+  backend. Both backends must pass one shared test suite through the facade (Sage).
 
 **Why.** Inventor parity needs fillets, chamfers, shells, drafts and booleans that are
 exact when faces are coplanar. truck has none of the blends in any release, and its last
@@ -222,8 +223,9 @@ These answer the versioning thread's four open questions.
 
 1. **Snapshots or operation log: both.** Every recorded edit is a microversion in the
    log, pointing at an immutable, content-addressed snapshot. Unchanged features dedupe
-   through hashing. Replay length is capped. Vote 9-0; Sage would start with snapshots
-   and add the log later.
+   through hashing. Replay length is capped. Snapshots are the only source of truth: the
+   log records what happened, for undo and audit, but nothing is ever rebuilt from it.
+   Vote 9-0; Sage would start with snapshots and add the log later.
 2. **Where history lives:** in the project store. A package carries one document's
    history only when it is exported.
 3. **Git compatibility:** through the layout and a deterministic export, never by making
@@ -282,15 +284,21 @@ that, so matching it buys nothing.
 dimensions, extrude distances, angles, counts, sketch-plane offsets and parameter
 values.
 
+- **Identity:** every `Value` also has a UUID (decision 6). The UUID is its identity
+  and the name is only a label.
 - **`expr`** is the text as entered: `40 mm`, `Length / 2`, `30 deg`. Literals are saved
   with an explicit unit, which the UI appends as Inventor does.
 - **`name`** is its Inventor-style model parameter name (`d0`, `d1`, …). The next number
   is the highest in use plus one, never a stored counter. Renaming a value rewrites the
-  expressions that use it.
+  expressions that use it. Two branches can both create `d7`. When that happens, the
+  merge renames the incoming one and rewrites the incoming side's expressions that
+  referred to it, resolving them by UUID rather than by name (Sage).
 - **Dimensions:** each field declares one (length, angle, unitless or integer count).
   Evaluation checks them, so `Length * Width` in a length field is an error on that
   feature.
 - **Functions** follow Inventor's.
+- **Reserved words:** unit, function and constant names (`mm`, `in`, `deg`, `sin`,
+  `PI`, …) can't be used as parameter names. The list freezes with the format at step 3.
 - **Evaluated numbers** are never stored.
 - **User parameters** are numeric for now. Text and true/false types are in the schema
   already; the UI for them comes later.
@@ -363,6 +371,13 @@ files may stop loading, with a clear error. At the freeze:
 - a `min_reader_version` in the manifest, so older builds open newer files read-only
   instead of silently dropping fields they don't know,
 - migration on read from then on, for every stored object.
+
+**Where versions live.** Every stored object (in the project store and in packages)
+records the schema version it was written with, and is migrated on read. Objects are
+never rewritten in place, because that would change their hashes. A store, and each
+package manifest, also records a `min_reader_version`: the oldest build that can read
+everything in it. An older build opens the store or package read-only and says why
+(Sage).
 
 This answers the global reviewer's question "OK to treat .smp as unstable until the step
 3 schema lands?" with yes.
