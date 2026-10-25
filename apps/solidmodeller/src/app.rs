@@ -4,13 +4,20 @@ use crate::mesh::SceneMesh;
 use crate::render::{Uniforms, ViewportRenderer};
 use crate::theme::{self, ColorScheme, Palette, ThemeEvent};
 use crate::viewcube::ViewCube;
-use crate::worker::RebuildWorker;
+use crate::worker::{Done, Worker};
 use egui::{Key, Modifiers, PointerButton, Sense};
 use glam::Vec2;
 use sm_document::{FeatureId, PartDocument};
-use sm_kernel::Model;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
+
+/// What is selected: a feature (from the browser or a pick) and, after a
+/// pick in the viewport, the face under the cursor.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Selection {
+    feature: Option<FeatureId>,
+    face: Option<u32>,
+}
 
 /// Something waiting on the user's answer to "save changes?".
 #[derive(Debug, Clone, PartialEq)]
@@ -25,15 +32,16 @@ pub struct SolidApp {
     path: Option<PathBuf>,
     modified: bool,
 
-    model: Option<Model>,
+    /// True once any rebuild of the current document has succeeded.
+    has_geometry: bool,
     scene: SceneMesh,
     rebuild_error: Option<String>,
-    worker: RebuildWorker,
-    /// Generation of the last rebuild result received.
-    received: u64,
+    worker: Worker,
     status: Option<String>,
     /// An action held back until unsaved changes are saved or discarded.
     pending: Option<Pending>,
+    /// What to do once the save the user asked for has succeeded.
+    after_save: Option<Pending>,
     /// Set once the user chose to close, so the close isn't intercepted again.
     closing: bool,
     title: String,
@@ -46,7 +54,7 @@ pub struct SolidApp {
     texture: Option<egui::TextureId>,
     mesh_version: u64,
 
-    selected_feature: Option<FeatureId>,
+    selected: Selection,
 
     theme_rx: Receiver<ThemeEvent>,
     omarchy: Option<Palette>,
@@ -69,18 +77,18 @@ impl SolidApp {
         cc.egui_ctx.set_visuals(palette.visuals());
 
         let ctx = cc.egui_ctx.clone();
-        let worker = RebuildWorker::new(move || ctx.request_repaint());
+        let worker = Worker::new(move || ctx.request_repaint());
         let mut app = SolidApp {
             doc,
             path,
             modified: false,
-            model: None,
+            has_geometry: false,
             scene: SceneMesh::default(),
             rebuild_error: None,
             worker,
-            received: 0,
             status: None,
             pending: None,
+            after_save: None,
             closing: false,
             title: String::new(),
             camera: Camera::default(),
@@ -89,7 +97,7 @@ impl SolidApp {
             last_frame: None,
             texture: None,
             mesh_version: 0,
-            selected_feature: None,
+            selected: Selection::default(),
             theme_rx,
             omarchy: None,
             scheme: ColorScheme::NoPreference,
@@ -100,11 +108,11 @@ impl SolidApp {
     }
 
     fn rebuild(&mut self) {
-        self.worker.submit(self.doc.clone());
+        self.worker.rebuild(self.doc.clone());
     }
 
     fn rebuilding(&self) -> bool {
-        self.worker.busy(self.received)
+        self.worker.busy()
     }
 
     fn poll_background(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
@@ -125,58 +133,78 @@ impl SolidApp {
             }
         }
 
-        if let Some(done) = self.worker.poll() {
-            self.received = done.generation;
-            match done.result {
-                Ok((model, scene)) => {
-                    let first = self.model.is_none();
-                    if let Some(rs) = frame.wgpu_render_state() {
-                        self.renderer.set_mesh(&rs.device, &scene);
+        for done in self.worker.poll() {
+            match done {
+                Done::Rebuilt { result, .. } => match result {
+                    Ok(scene) => {
+                        if let Some(rs) = frame.wgpu_render_state() {
+                            self.renderer.set_mesh(&rs.device, &scene);
+                        }
+                        self.camera.scene_center = scene.center;
+                        self.camera.scene_radius = scene.radius;
+                        // Face indices don't survive a rebuild.
+                        self.selected.face = None;
+                        self.scene = scene;
+                        self.mesh_version += 1;
+                        self.rebuild_error = None;
+                        self.fit_on_next_frame |= !self.has_geometry;
+                        self.has_geometry = true;
                     }
-                    self.camera.scene_center = scene.center;
-                    self.camera.scene_radius = scene.radius;
-                    self.scene = scene;
-                    self.model = Some(model);
-                    self.mesh_version += 1;
-                    self.rebuild_error = None;
-                    self.fit_on_next_frame |= first;
+                    // Keep showing the last good geometry, like Inventor
+                    // does while a feature is sick.
+                    Err(e) => self.rebuild_error = Some(e),
+                },
+                Done::Opened { path, result } => match result {
+                    Ok(doc) => {
+                        self.doc = doc;
+                        self.path = Some(path);
+                        self.modified = false;
+                        self.has_geometry = false;
+                        self.rebuild_error = None;
+                        self.selected = Selection::default();
+                        // Drop the old part's geometry so nothing of it can
+                        // be picked while the new one rebuilds.
+                        self.scene = SceneMesh::default();
+                        if let Some(rs) = frame.wgpu_render_state() {
+                            self.renderer.set_mesh(&rs.device, &self.scene);
+                        }
+                        self.mesh_version += 1;
+                        self.status = None;
+                        self.rebuild();
+                    }
+                    Err(e) => self.status = Some(format!("Could not open {}: {e}", path.display())),
+                },
+                Done::Saved { path, result } => {
+                    let next = self.after_save.take();
+                    match result {
+                        Ok(_) => {
+                            self.status = Some(format!("Saved {}", path.display()));
+                            if let Some(next) = next {
+                                self.proceed(next, ctx);
+                            }
+                        }
+                        Err(e) => {
+                            // The document isn't on disk after all.
+                            self.modified = true;
+                            self.status = Some(format!("Save failed: {e}"));
+                        }
+                    }
                 }
-                // Keep showing the last good geometry, like Inventor does
-                // while a feature is sick.
-                Err(e) => self.rebuild_error = Some(e),
             }
         }
     }
 
-    fn selected_body(&self) -> Option<u32> {
-        let id = self.selected_feature?;
-        self.scene
-            .bodies
-            .iter()
-            .position(|&f| f == id)
-            .map(|i| i as u32)
-    }
-
-    fn save(&mut self) {
+    /// Saves on the worker. The document counts as saved right away so the
+    /// unsaved-changes prompt can proceed; a failure marks it modified again.
+    fn save(&mut self) -> bool {
         let Some(path) = self.path.clone() else {
             self.status = Some("Start with a file path to save (solidmodeller part.smp)".into());
-            return;
+            return false;
         };
-        // Only cache geometry that matches the document being saved.
-        let step = match (
-            &self.model,
-            self.rebuilding() || self.rebuild_error.is_some(),
-        ) {
-            (Some(model), false) => Some(sm_step::export(model, &file_label(&path))),
-            _ => None,
-        };
-        self.status = Some(match sm_format::save(&path, &self.doc, step.as_deref()) {
-            Ok(()) => {
-                self.modified = false;
-                format!("Saved {}", path.display())
-            }
-            Err(e) => format!("Save failed: {e}"),
-        });
+        self.worker.save(path, self.doc.clone());
+        self.modified = false;
+        self.status = Some("Saving…".into());
+        true
     }
 
     /// Opens `path`, asking first if there are unsaved changes.
@@ -184,23 +212,7 @@ impl SolidApp {
         if self.modified {
             self.pending = Some(Pending::Open(path));
         } else {
-            self.open(path);
-        }
-    }
-
-    fn open(&mut self, path: PathBuf) {
-        match sm_format::open(&path) {
-            Ok(file) => {
-                self.doc = file.document;
-                self.path = Some(path);
-                self.modified = false;
-                self.model = None;
-                self.rebuild_error = None;
-                self.selected_feature = None;
-                self.status = None;
-                self.rebuild();
-            }
-            Err(e) => self.status = Some(format!("Could not open {}: {e}", path.display())),
+            self.worker.open(path);
         }
     }
 
@@ -268,8 +280,16 @@ impl SolidApp {
             } else if let Some(e) = &self.rebuild_error {
                 ui.colored_label(self.palette.error.egui(), format!("Rebuild failed: {e}"));
             } else {
-                let n = self.scene.bodies.len();
+                let n = self.scene.mesh.bodies.len();
                 ui.label(format!("{n} {}", if n == 1 { "body" } else { "bodies" }));
+            }
+            let face = self
+                .selected
+                .face
+                .and_then(|f| self.scene.mesh.faces.get(f as usize));
+            if let Some(face) = face {
+                ui.separator();
+                ui.label(format!("Face {}", face.name));
             }
             if let Some(s) = &self.status {
                 ui.separator();
@@ -292,7 +312,7 @@ impl SolidApp {
         let local = |p: egui::Pos2| Vec2::new(p.x - rect.left(), p.y - rect.top());
 
         // Wait for a real size: a fit against a 0-pixel viewport is useless.
-        if self.fit_on_next_frame && self.model.is_some() && size.x >= 1.0 && size.y >= 1.0 {
+        if self.fit_on_next_frame && self.has_geometry && size.x >= 1.0 && size.y >= 1.0 {
             self.camera.fit(size.x / size.y.max(1.0));
             self.fit_on_next_frame = false;
         }
@@ -326,10 +346,18 @@ impl SolidApp {
                     self.camera.go_to(view, now);
                 } else if !cube.rect().contains(pos) {
                     let (origin, dir) = self.camera.ray(local(pos), size);
-                    self.selected_feature = self
-                        .scene
-                        .pick(origin, dir)
-                        .and_then(|b| self.scene.bodies.get(b as usize).copied());
+                    let mesh = &self.scene.mesh;
+                    self.selected = match mesh.pick(origin.into(), dir.into()) {
+                        Some((face, _)) => Selection {
+                            feature: self
+                                .scene
+                                .body_features
+                                .get(mesh.faces[face].body as usize)
+                                .copied(),
+                            face: Some(face as u32),
+                        },
+                        None => Selection::default(),
+                    };
                 }
             }
         }
@@ -405,7 +433,15 @@ impl SolidApp {
             p.background
                 .mix(p.foreground, if p.dark { 0.14 } else { 0.10 }),
         );
-        u.selected[0] = self.selected_body().unwrap_or(u32::MAX);
+        u.selected = [
+            self.selected
+                .feature
+                .and_then(|f| self.scene.group_of(f))
+                .unwrap_or(u32::MAX),
+            self.selected.face.unwrap_or(u32::MAX),
+            0,
+            0,
+        ];
         u
     }
 
@@ -422,7 +458,7 @@ impl SolidApp {
             self.fit_on_next_frame = true;
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-            self.selected_feature = None;
+            self.selected = Selection::default();
         }
         let dropped = ctx.input(|i| {
             i.raw
@@ -468,7 +504,7 @@ impl eframe::App for SolidApp {
                 ui.heading("Model");
                 ui.separator();
                 egui::ScrollArea::both().show(ui, |ui| {
-                    action = browser::show(ui, &self.doc, self.selected_feature, &self.palette);
+                    action = browser::show(ui, &self.doc, self.selected.feature, &self.palette);
                 });
             });
         egui::CentralPanel::default()
@@ -476,8 +512,11 @@ impl eframe::App for SolidApp {
             .show(ui, |ui| self.viewport(ui, frame));
 
         if let Some(action) = action {
-            if let BrowserAction::Select(id) = action {
-                self.selected_feature = id;
+            if let BrowserAction::Select(feature) = action {
+                self.selected = Selection {
+                    feature,
+                    face: None,
+                };
             }
             if browser::apply(&mut self.doc, action) {
                 self.modified = true;
@@ -516,27 +555,26 @@ impl SolidApp {
         let Some(save) = choice else {
             return;
         };
-        if save {
-            self.save();
-            if self.modified {
-                // Save failed; the status bar says why. Stay put.
-                self.pending = None;
-                return;
-            }
-        }
         self.pending = None;
-        self.modified = false;
+        if save {
+            // Carry on only once the save has really succeeded: closing or
+            // opening first could lose the changes if it fails.
+            if self.save() {
+                self.after_save = Some(pending);
+            }
+        } else {
+            self.modified = false;
+            self.proceed(pending, ui.ctx());
+        }
+    }
+
+    fn proceed(&mut self, pending: Pending, ctx: &egui::Context) {
         match pending {
             Pending::Close => {
                 self.closing = true;
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
-            Pending::Open(path) => self.open(path),
+            Pending::Open(path) => self.worker.open(path),
         }
     }
-}
-
-fn file_label(path: &std::path::Path) -> String {
-    path.file_name()
-        .map_or_else(|| "part".into(), |n| n.to_string_lossy().into_owned())
 }

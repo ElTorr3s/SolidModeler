@@ -16,23 +16,27 @@ use std::time::{Duration, SystemTime};
 pub struct Rgb(pub u8, pub u8, pub u8);
 
 impl Rgb {
-    /// Parses `#rrggbb`, `0xrrggbb`, `rrggbb`, `rgb(rrggbb)` or `rgba(rrggbbaa)`.
+    /// Parses `#rrggbb`, `rrggbb`, `#rrggbbaa`, `rgb(rrggbb)`,
+    /// `rgba(rrggbbaa)`, and Hyprland's legacy `0xaarrggbb` (alpha first).
     /// Alpha is ignored.
     pub fn parse(s: &str) -> Option<Rgb> {
         let s = s.trim().trim_matches(|c| c == '"' || c == '\'');
-        let s = s
-            .strip_prefix("rgba(")
-            .or_else(|| s.strip_prefix("rgb("))
-            .map(|s| s.trim_end_matches(')'))
-            .unwrap_or(s);
-        let hex = s
-            .strip_prefix('#')
-            .or_else(|| s.strip_prefix("0x"))
-            .unwrap_or(s);
-        if !(hex.len() == 6 || hex.len() == 8) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let (hex, alpha_first) = if let Some(h) = s.strip_prefix("0x") {
+            (h, true)
+        } else if let Some(h) = s.strip_prefix("rgba(").or_else(|| s.strip_prefix("rgb(")) {
+            (h.strip_suffix(')')?, false)
+        } else {
+            (s.strip_prefix('#').unwrap_or(s), false)
+        };
+        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
             return None;
         }
-        let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+        let offset = match (hex.len(), alpha_first) {
+            (6, _) | (8, false) => 0,
+            (8, true) => 2,
+            _ => return None,
+        };
+        let byte = |i: usize| u8::from_str_radix(&hex[offset + i..offset + i + 2], 16).ok();
         Some(Rgb(byte(0)?, byte(2)?, byte(4)?))
     }
 
@@ -203,12 +207,27 @@ const THEME_FILES: [&str; 6] = [
 /// Theme files are tiny; anything bigger is not a theme file.
 const MAX_THEME_FILE: u64 = 256 * 1024;
 
+/// Reads a theme file if it is a regular file of at most [`MAX_THEME_FILE`]
+/// bytes. The file is opened once and checked through that handle, and
+/// opened non-blocking so a FIFO planted in its place can't stall the
+/// watcher; at most `MAX_THEME_FILE` bytes are read even if it grows.
 fn read_small(path: &Path) -> Option<String> {
-    let meta = fs::metadata(path).ok()?;
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
     if !meta.is_file() || meta.len() > MAX_THEME_FILE {
         return None;
     }
-    fs::read_to_string(path).ok()
+    let mut text = String::new();
+    file.take(MAX_THEME_FILE + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    (text.len() as u64 <= MAX_THEME_FILE).then_some(text)
 }
 
 /// Reads the palette from an Omarchy theme directory. Returns `None` if no
@@ -263,7 +282,8 @@ pub fn load_omarchy(dir: &Path) -> Option<Palette> {
     let dark = if dir.join("light.mode").exists() {
         false
     } else {
-        background.luminance() < 0.5
+        // 0.18 is mid-grey (L* = 50) in linear luminance.
+        background.luminance() < 0.18
     };
     let fallback = Palette::fallback(dark);
     Some(Palette {
@@ -367,21 +387,22 @@ fn hyprland_active_border(text: &str) -> Option<Rgb> {
         if key.starts_with('$') {
             variables.insert(key, value);
         }
-        if key == "col.active_border" || key == "$activeBorderColor" {
+        if key == "col.active_border" {
             border = Some(value);
         }
     }
-    let value = border?;
+    // The setting itself wins; Omarchy's variable is the fallback.
+    let value = border.or_else(|| variables.get("$activeBorderColor").copied())?;
     let value = variables.get(value).copied().unwrap_or(value);
     value.split_whitespace().find_map(Rgb::parse)
 }
 
-/// Cheap fingerprint of a theme directory, to notice a theme switch. Omarchy
-/// switches by repointing a symlink, so the resolved path changes; editing a
-/// theme in place changes file mtimes.
 /// Resolved theme path plus (mtime, size) of each of [`THEME_FILES`].
 type Fingerprint = (PathBuf, Vec<Option<(SystemTime, u64)>>);
 
+/// Cheap fingerprint of a theme directory, to notice a theme switch. Omarchy
+/// switches by repointing a symlink, so the resolved path changes; editing a
+/// theme in place changes file mtimes.
 fn fingerprint(dir: &Path) -> Option<Fingerprint> {
     let path = fs::canonicalize(dir).ok()?;
     let files = THEME_FILES
@@ -512,6 +533,16 @@ mod tests {
         assert_eq!(Rgb::parse("#1a1b26"), Some(Rgb(0x1a, 0x1b, 0x26)));
         assert_eq!(Rgb::parse("0x1A1B26"), Some(Rgb(0x1a, 0x1b, 0x26)));
         assert_eq!(Rgb::parse("rgba(33ccffee)"), Some(Rgb(0x33, 0xcc, 0xff)));
+        assert_eq!(Rgb::parse("rgb(33ccff)"), Some(Rgb(0x33, 0xcc, 0xff)));
+        // Hyprland legacy colors put alpha first.
+        assert_eq!(Rgb::parse("0xff33ccff"), Some(Rgb(0x33, 0xcc, 0xff)));
+        assert_eq!(Rgb::parse("#33ccffee"), Some(Rgb(0x33, 0xcc, 0xff)));
+        assert_eq!(Rgb::parse("rgb(33ccff"), None);
+        assert_eq!(Rgb::parse("#12345"), None);
+        assert_eq!(Rgb::parse("#1234567890"), None);
+        assert_eq!(Rgb::parse("#zzzzzz"), None);
+        assert_eq!(Rgb::parse("#ééé"), None);
+        assert_eq!(Rgb::parse(""), None);
         assert_eq!(Rgb::parse("\"#ffffff\""), Some(Rgb(255, 255, 255)));
         assert_eq!(Rgb::parse("#fff"), None);
         assert_eq!(Rgb::parse("red"), None);
@@ -574,6 +605,65 @@ mod tests {
         let p = load_omarchy(&ghostty).unwrap();
         assert_eq!(p.foreground, Rgb(0xeb, 0xdb, 0xb2));
         assert_eq!(p.accent, Rgb(0x45, 0x85, 0x88));
+    }
+
+    #[test]
+    fn hyprland_border_setting_wins_in_any_order() {
+        let setting_first = "col.active_border = 0xff112233\n$activeBorderColor = rgb(445566)\n";
+        assert_eq!(
+            hyprland_active_border(setting_first),
+            Some(Rgb(0x11, 0x22, 0x33))
+        );
+        let variable_only = "$activeBorderColor = rgb(445566)\n";
+        assert_eq!(
+            hyprland_active_border(variable_only),
+            Some(Rgb(0x44, 0x55, 0x66))
+        );
+        let gradient = "general {\n col.active_border = rgba(33ccffee) rgba(00ff99ee) 45deg\n}";
+        assert_eq!(
+            hyprland_active_border(gradient),
+            Some(Rgb(0x33, 0xcc, 0xff))
+        );
+        assert_eq!(
+            hyprland_active_border("col.inactive_border = rgb(000000)"),
+            None
+        );
+    }
+
+    #[test]
+    fn mid_light_grey_background_is_light() {
+        // Linear luminance of #aaaaaa is about 0.40; it reads as a light theme.
+        let dir = theme_dir(&[(
+            "colors.toml",
+            "background = \"#aaaaaa\"\nforeground = \"#111111\"\n",
+        )]);
+        assert!(!load_omarchy(&dir).unwrap().dark);
+        let dir = theme_dir(&[(
+            "colors.toml",
+            "background = \"#444444\"\nforeground = \"#eeeeee\"\n",
+        )]);
+        assert!(load_omarchy(&dir).unwrap().dark);
+    }
+
+    #[test]
+    fn hostile_files_are_skipped() {
+        // Oversized file, a directory, and a FIFO in place of theme files.
+        let dir = theme_dir(&[]);
+        let big = format!(
+            "background = \"#000000\"\n{}",
+            "#".repeat(MAX_THEME_FILE as usize)
+        );
+        fs::write(dir.join("colors.toml"), big).unwrap();
+        fs::create_dir(dir.join("alacritty.toml")).unwrap();
+        let fifo = dir.join("kitty.conf");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: plain libc call on a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert_eq!(read_small(&dir.join("colors.toml")), None);
+        assert_eq!(read_small(&dir.join("alacritty.toml")), None);
+        // Returns at once instead of blocking on the FIFO.
+        assert_eq!(read_small(&fifo), None);
+        assert!(load_omarchy(&dir).is_none());
     }
 
     #[test]

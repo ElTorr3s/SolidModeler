@@ -148,7 +148,8 @@ impl Camera {
         self.half_height = self.scene_radius * margin / aspect.clamp(1e-3, 1.0);
     }
 
-    /// Starts animating to a standard view, then fits.
+    /// Starts animating to a standard view. Zoom is unchanged; callers that
+    /// want Zoom All as well (Home view) ask for a fit separately.
     pub fn go_to(&mut self, view: StandardView, now: f32) {
         self.go_to_rotation(view.rotation(), now);
     }

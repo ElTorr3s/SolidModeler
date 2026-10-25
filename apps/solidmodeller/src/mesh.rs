@@ -1,199 +1,256 @@
-//! Turns rebuilt B-rep bodies into GPU-ready triangles and edge lines.
+//! Turns rebuilt bodies into the kernel-agnostic [`sm_mesh::Mesh`] the
+//! viewport draws.
+//!
+//! This truck adapter is temporary: once the kernel facade emits
+//! `sm_mesh::Mesh` itself (with persistent names from sm-naming), this file
+//! and the app's truck dependency go away. Until then face and edge names
+//! are positional placeholders (`b0.f3`), stable only between identical
+//! rebuilds.
 
-use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 use sm_document::FeatureId;
 use sm_kernel::Model;
+use sm_mesh::{EdgeRun, FaceRange, Mesh};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use truck_meshalgo::prelude::*;
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
-pub struct Vertex {
-    pub pos: [f32; 3],
-    pub normal: [f32; 3],
-    /// Index into [`SceneMesh::bodies`], for highlighting.
-    pub body: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
-pub struct LineVertex {
-    pub pos: [f32; 3],
-    pub body: u32,
-}
-
-/// Everything the viewport draws for one rebuilt model.
+/// What the viewport shows for one rebuild.
 #[derive(Debug, Default)]
 pub struct SceneMesh {
-    /// Unindexed triangle list.
-    pub triangles: Vec<Vertex>,
-    /// Line list: B-rep edges as polylines, two vertices per segment.
-    pub edges: Vec<LineVertex>,
-    /// The feature that created each body.
-    pub bodies: Vec<FeatureId>,
+    pub mesh: Mesh,
+    /// The feature that created each body, by body index.
+    pub body_features: Vec<FeatureId>,
     pub center: Vec3,
     pub radius: f32,
 }
 
+impl SceneMesh {
+    /// Highlight group of a body: the first body its feature created, so
+    /// selecting a feature lights up every body it made.
+    pub fn group(&self, body: u32) -> u32 {
+        let Some(feature) = self.body_features.get(body as usize) else {
+            return u32::MAX;
+        };
+        self.group_of(feature).unwrap_or(u32::MAX)
+    }
+
+    pub fn group_of(&self, feature: FeatureId) -> Option<u32> {
+        self.body_features
+            .iter()
+            .position(|&f| f == feature)
+            .map(|i| i as u32)
+    }
+}
+
 /// Chord tolerance as a fraction of the model's bounding-box diagonal.
 const RELATIVE_TOLERANCE: f64 = 1e-3;
+/// Most triangles a scene may have (about 300 MB of GPU buffers).
+pub const MAX_TRIANGLES: usize = 10_000_000;
 
-pub fn tessellate(model: &Model) -> SceneMesh {
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum TessellateError {
+    #[error("cancelled")]
+    Cancelled,
+    #[error("the model needs more than {MAX_TRIANGLES} triangles to display")]
+    TooManyTriangles,
+    #[error("tessellation produced an invalid mesh: {0}")]
+    Invalid(#[from] sm_mesh::MeshError),
+}
+
+pub fn tessellate(model: &Model, cancel: &AtomicBool) -> Result<SceneMesh, TessellateError> {
+    let to_mm = model.units.to_mm();
     let mut scene = SceneMesh::default();
-    let (min, max) = bounds(model);
-    if min.x > max.x {
-        return scene;
-    }
-    scene.center = (min + max) / 2.0;
-    scene.radius = ((max - min).length() / 2.0).max(1e-3);
-    let tol = (2.0 * scene.radius as f64 * RELATIVE_TOLERANCE).max(1e-6);
+    let Some((min, max)) = vertex_bounds(model) else {
+        return Ok(scene);
+    };
+    let diagonal = f64::from((max - min).length());
+    let tol = (diagonal * RELATIVE_TOLERANCE).max(1e-6);
+    let mm = |p: Point3| {
+        [
+            (p.x * to_mm) as f32,
+            (p.y * to_mm) as f32,
+            (p.z * to_mm) as f32,
+        ]
+    };
+    let mesh = &mut scene.mesh;
 
-    for (index, body) in model.bodies.iter().enumerate() {
-        let index = index as u32;
-        scene.bodies.push(body.feature);
+    for (b, body) in model.bodies.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(TessellateError::Cancelled);
+        }
+        mesh.bodies.push(format!("body{b}"));
+        scene.body_features.push(body.feature);
         let meshed = body.solid.triangulation(tol);
-        let polygon = meshed.to_polygon();
-        let positions = polygon.positions();
-        let normals = polygon.normals();
-        for tri in polygon.faces().triangle_iter() {
-            let p = tri.map(|v| to_vec(positions[v.pos]));
-            let flat = (p[1] - p[0]).cross(p[2] - p[0]).normalize_or_zero();
-            if flat == Vec3::ZERO {
-                continue; // degenerate sliver
-            }
-            for (v, pos) in tri.iter().zip(p) {
-                let normal = v
-                    .nor
-                    .and_then(|i| normals.get(i))
-                    .map(|n| Vec3::new(n.x as f32, n.y as f32, n.z as f32).normalize_or_zero())
-                    .filter(|n| *n != Vec3::ZERO)
-                    .unwrap_or(flat);
-                scene.triangles.push(Vertex {
-                    pos: pos.into(),
-                    normal: normal.into(),
-                    body: index,
-                });
+
+        // One face at a time, each with its own vertices, so faces can be
+        // picked and highlighted on their own.
+        let mut face_index = 0;
+        for shell in meshed.boundaries() {
+            for face in shell.face_iter() {
+                let Some(mut poly) = face.surface() else {
+                    continue;
+                };
+                if !face.orientation() {
+                    poly.invert();
+                }
+                let first_index = mesh.indices.len() as u32;
+                let positions = poly.positions();
+                let normals = poly.normals();
+                for tri in poly.faces().triangle_iter() {
+                    let p = tri.map(|v| mm(positions[v.pos]));
+                    let [a, b, c] = p.map(Vec3::from);
+                    let flat = (b - a).cross(c - a).normalize_or_zero();
+                    if flat == Vec3::ZERO {
+                        continue; // degenerate sliver
+                    }
+                    for (v, pos) in tri.iter().zip(p) {
+                        let normal = v
+                            .nor
+                            .and_then(|i| normals.get(i))
+                            .map(|n| Vec3::new(n.x as f32, n.y as f32, n.z as f32))
+                            .map(|n| n.normalize_or_zero())
+                            .filter(|n| *n != Vec3::ZERO)
+                            .unwrap_or(flat);
+                        mesh.indices.push(mesh.positions.len() as u32);
+                        mesh.positions.push(pos);
+                        mesh.normals.push(normal.into());
+                    }
+                }
+                if mesh.indices.len() / 3 > MAX_TRIANGLES {
+                    return Err(TessellateError::TooManyTriangles);
+                }
+                let index_count = mesh.indices.len() as u32 - first_index;
+                if index_count > 0 {
+                    mesh.faces.push(FaceRange {
+                        name: format!("b{b}.f{face_index}"),
+                        body: b as u32,
+                        first_index,
+                        index_count,
+                    });
+                    face_index += 1;
+                }
             }
         }
 
-        // A shell lists each edge once per adjacent face; draw it once.
+        // A shell lists each edge once per adjacent face; keep one copy.
         let mut seen = HashSet::new();
         for shell in meshed.boundaries() {
             for edge in shell.edge_iter() {
                 if !seen.insert(edge.id()) {
                     continue;
                 }
-                let polyline = edge.curve();
-                for pair in polyline.0.windows(2) {
-                    for p in pair {
-                        scene.edges.push(LineVertex {
-                            pos: to_vec(*p).into(),
-                            body: index,
-                        });
-                    }
+                let points = edge.curve().0;
+                if points.len() < 2 {
+                    continue;
                 }
+                mesh.edges.push(EdgeRun {
+                    name: format!("b{b}.e{}", seen.len() - 1),
+                    body: b as u32,
+                    first_point: mesh.edge_points.len() as u32,
+                    point_count: points.len() as u32,
+                });
+                mesh.edge_points.extend(points.into_iter().map(mm));
             }
         }
     }
-    scene
+    mesh.validate()?;
+    if let Some((lo, hi)) = mesh.bounds() {
+        let (lo, hi) = (Vec3::from(lo), Vec3::from(hi));
+        scene.center = (lo + hi) / 2.0;
+        scene.radius = ((hi - lo).length() / 2.0).max(1e-3);
+    }
+    Ok(scene)
 }
 
-fn to_vec(p: Point3) -> Vec3 {
-    Vec3::new(p.x as f32, p.y as f32, p.z as f32)
-}
-
-/// Bounding box of every B-rep vertex. Exact for the planar solids the
-/// kernel makes today; curved faces can bulge past their vertices, so the
-/// viewer pads the fit.
-fn bounds(model: &Model) -> (Vec3, Vec3) {
-    let mut min = Vec3::splat(f32::INFINITY);
-    let mut max = Vec3::splat(f32::NEG_INFINITY);
-    for body in &model.bodies {
-        for shell in body.solid.boundaries() {
-            for v in shell.vertex_iter() {
-                let p = to_vec(v.point());
-                min = min.min(p);
-                max = max.max(p);
-            }
-        }
-    }
-    (min, max)
-}
-
-impl SceneMesh {
-    /// The body hit first by a ray, if any.
-    pub fn pick(&self, origin: Vec3, dir: Vec3) -> Option<u32> {
-        let mut best: Option<(f32, u32)> = None;
-        for tri in self.triangles.chunks_exact(3) {
-            let [a, b, c] = [tri[0].pos, tri[1].pos, tri[2].pos].map(Vec3::from);
-            if let Some(t) = ray_triangle(origin, dir, a, b, c) {
-                if best.is_none_or(|(bt, _)| t < bt) {
-                    best = Some((t, tri[0].body));
-                }
-            }
-        }
-        best.map(|(_, body)| body)
-    }
-}
-
-/// Möller–Trumbore, two-sided.
-fn ray_triangle(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
-    let (e1, e2) = (b - a, c - a);
-    let p = dir.cross(e2);
-    let det = e1.dot(p);
-    if det.abs() < 1e-12 {
-        return None;
-    }
-    let inv = 1.0 / det;
-    let s = origin - a;
-    let u = s.dot(p) * inv;
-    if !(0.0..=1.0).contains(&u) {
-        return None;
-    }
-    let q = s.cross(e1);
-    let v = dir.dot(q) * inv;
-    if v < 0.0 || u + v > 1.0 {
-        return None;
-    }
-    let t = e2.dot(q) * inv;
-    (t >= 0.0).then_some(t)
+/// Bounds of every B-rep vertex, in model units, for the chord tolerance.
+fn vertex_bounds(model: &Model) -> Option<(Vec3, Vec3)> {
+    let mut points = model
+        .bodies
+        .iter()
+        .flat_map(|b| b.solid.boundaries())
+        .flat_map(|s| s.vertex_iter().map(|v| v.point()))
+        .map(|p| Vec3::new(p.x as f32, p.y as f32, p.z as f32));
+    let first = points.next()?;
+    Some(points.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p))))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::demo;
+    use sm_document::LengthUnit;
 
-    #[test]
-    fn demo_part_tessellates_with_outward_normals() {
+    fn demo_scene() -> SceneMesh {
         let model = sm_kernel::rebuild(&demo::document()).unwrap();
-        let scene = tessellate(&model);
-        assert_eq!(scene.bodies.len(), 1);
-        assert!(scene.triangles.len() >= 3 * 12);
-        assert_eq!(scene.edges.len() % 2, 0);
-        // 40 x 20 x 10 block: centered at (20, 10, 5).
-        assert!(scene.center.distance(Vec3::new(20.0, 10.0, 5.0)) < 1e-3);
+        tessellate(&model, &AtomicBool::new(false)).unwrap()
+    }
 
-        // Outward normals: every normal points away from the solid, so a
-        // closed solid's normals, weighted by area, sum to ~zero, and the
-        // divergence-theorem volume is positive.
-        let mut volume = 0.0;
-        for tri in scene.triangles.chunks_exact(3) {
-            let [a, b, c] = [tri[0].pos, tri[1].pos, tri[2].pos].map(Vec3::from);
-            volume += a.dot(b.cross(c)) / 6.0;
-        }
-        // Block minus pocket (20x10x5) minus notch (8x20x4).
-        let expected = 40.0 * 20.0 * 10.0 - 20.0 * 10.0 * 5.0 - 8.0 * 20.0 * 4.0;
-        assert!((volume - expected).abs() < 1.0, "volume {volume}");
+    /// Signed volume by the divergence theorem: positive only if every
+    /// triangle winds outward.
+    fn volume(mesh: &Mesh) -> f32 {
+        mesh.indices
+            .chunks_exact(3)
+            .map(|t| {
+                let [a, b, c] = [t[0], t[1], t[2]].map(|i| Vec3::from(mesh.positions[i as usize]));
+                a.dot(b.cross(c)) / 6.0
+            })
+            .sum()
     }
 
     #[test]
-    fn picks_nearest_body() {
+    fn demo_part_tessellates_with_outward_normals() {
+        let scene = demo_scene();
+        let mesh = &scene.mesh;
+        assert_eq!(mesh.validate(), Ok(()));
+        assert_eq!(mesh.bodies.len(), 1);
+        assert_eq!(scene.body_features.len(), 1);
+        // Block (6 faces) + pocket (5) + notch (2 new faces, 1 shared top
+        // face changes shape) gives at least 12 faces.
+        assert!(mesh.faces.len() >= 12, "{} faces", mesh.faces.len());
+        assert!(mesh.edges.len() >= 18, "{} edges", mesh.edges.len());
+        assert!(scene.center.distance(Vec3::new(20.0, 10.0, 5.0)) < 1e-3);
+
+        let expected = 40.0 * 20.0 * 10.0 - 20.0 * 10.0 * 5.0 - 8.0 * 20.0 * 4.0;
+        let v = volume(mesh);
+        assert!((v - expected).abs() < 1.0, "volume {v}");
+    }
+
+    #[test]
+    fn coordinates_are_millimetres() {
+        let mut doc = demo::document();
+        doc.units = LengthUnit::Cm;
+        let model = sm_kernel::rebuild(&doc).unwrap();
+        let scene = tessellate(&model, &AtomicBool::new(false)).unwrap();
+        let (_, hi) = scene.mesh.bounds().unwrap();
+        assert!((hi[0] - 400.0).abs() < 1e-3, "{hi:?}");
+    }
+
+    #[test]
+    fn picks_named_faces() {
+        let scene = demo_scene();
+        let mesh = &scene.mesh;
+        // Straight down onto the pocket floor at z = 5.
+        let (face, t) = mesh.pick([15.0, 10.0, 100.0], [0.0, 0.0, -1.0]).unwrap();
+        assert!((t - 95.0).abs() < 1e-3);
+        assert_eq!(mesh.faces[face].body, 0);
+        // The top face around the pocket at z = 10 is a different face.
+        let (top, _) = mesh.pick([2.0, 2.0, 100.0], [0.0, 0.0, -1.0]).unwrap();
+        assert_ne!(face, top);
+        assert_eq!(mesh.pick([-50.0, 2.0, 100.0], [0.0, 0.0, -1.0]), None);
+    }
+
+    #[test]
+    fn cancel_and_empty() {
         let model = sm_kernel::rebuild(&demo::document()).unwrap();
-        let scene = tessellate(&model);
-        let hit = scene.pick(Vec3::new(2.0, 2.0, 100.0), Vec3::NEG_Z);
-        assert_eq!(hit, Some(0));
-        assert_eq!(scene.pick(Vec3::new(-50.0, 2.0, 100.0), Vec3::NEG_Z), None);
+        let cancelled = tessellate(&model, &AtomicBool::new(true));
+        assert_eq!(cancelled.err(), Some(TessellateError::Cancelled));
+
+        let empty = Model {
+            units: LengthUnit::Mm,
+            bodies: Vec::new(),
+        };
+        let scene = tessellate(&empty, &AtomicBool::new(false)).unwrap();
+        assert_eq!(scene.mesh, Mesh::default());
     }
 }

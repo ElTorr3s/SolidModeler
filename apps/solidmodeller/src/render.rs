@@ -2,7 +2,7 @@
 //! image. Rendering only happens when something changed (camera, model,
 //! theme, size), so an idle window costs nothing.
 
-use crate::mesh::{LineVertex, SceneMesh, Vertex};
+use crate::mesh::SceneMesh;
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
 use wgpu::util::DeviceExt;
@@ -12,6 +12,24 @@ const DISPLAY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// 4x MSAA is guaranteed for these formats on every WebGPU backend.
 const SAMPLES: u32 = 4;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct Vertex {
+    pos: [f32; 3],
+    normal: [f32; 3],
+    /// Index into the mesh's faces.
+    face: u32,
+    /// Highlight group: the bodies a feature created (see [`SceneMesh::group`]).
+    group: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct LineVertex {
+    pos: [f32; 3],
+    group: u32,
+}
 
 /// Colors are linear RGB(A).
 #[repr(C)]
@@ -27,7 +45,7 @@ pub struct Uniforms {
     pub highlight: [f32; 4],
     pub bg_top: [f32; 4],
     pub bg_bottom: [f32; 4],
-    /// x: selected body index, or `u32::MAX` for none.
+    /// x: selected highlight group, y: selected face; `u32::MAX` for none.
     pub selected: [u32; 4],
 }
 
@@ -42,7 +60,7 @@ impl Uniforms {
             highlight: [0.2, 0.4, 1.0, 1.0],
             bg_top: [0.1, 0.1, 0.1, 1.0],
             bg_bottom: [0.2, 0.2, 0.2, 1.0],
-            selected: [u32::MAX, 0, 0, 0],
+            selected: [u32::MAX, u32::MAX, 0, 0],
         }
     }
 }
@@ -84,15 +102,22 @@ fn fs_bg(in: BgOut) -> @location(0) vec4<f32> {
 struct MeshOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) normal: vec3<f32>,
-    @location(1) @interpolate(flat) body: u32,
+    @location(1) @interpolate(flat) face: u32,
+    @location(2) @interpolate(flat) group: u32,
 };
 
 @vertex
-fn vs_mesh(@location(0) pos: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) body: u32) -> MeshOut {
+fn vs_mesh(
+    @location(0) pos: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) face: u32,
+    @location(3) group: u32,
+) -> MeshOut {
     var out: MeshOut;
     out.pos = u.view_proj * vec4<f32>(pos, 1.0);
     out.normal = normal;
-    out.body = body;
+    out.face = face;
+    out.group = group;
     return out;
 }
 
@@ -101,7 +126,13 @@ fn fs_mesh(in: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     var n = normalize(in.normal);
     if (!front) { n = -n; }
     var base = u.body.rgb;
-    if (in.body == u.selected.x) { base = u.highlight.rgb; }
+    // A picked face is fully highlighted; the rest of its feature's bodies
+    // are tinted, like Inventor's selection.
+    if (in.face == u.selected.y) {
+        base = u.highlight.rgb;
+    } else if (in.group == u.selected.x) {
+        base = mix(base, u.highlight.rgb, 0.45);
+    }
     let l = normalize(u.light.xyz);
     let v = normalize(u.eye.xyz);
     let diffuse = max(dot(n, l), 0.0);
@@ -115,23 +146,23 @@ fn fs_mesh(in: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4
 
 struct LineOut {
     @builtin(position) pos: vec4<f32>,
-    @location(0) @interpolate(flat) body: u32,
+    @location(0) @interpolate(flat) group: u32,
 };
 
 @vertex
-fn vs_line(@location(0) pos: vec3<f32>, @location(1) body: u32) -> LineOut {
+fn vs_line(@location(0) pos: vec3<f32>, @location(1) group: u32) -> LineOut {
     var out: LineOut;
     out.pos = u.view_proj * vec4<f32>(pos, 1.0);
     // Pull edges slightly towards the camera so they win the depth test
     // against their own faces. Orthographic, so w is 1.
     out.pos.z = out.pos.z - 2e-4;
-    out.body = body;
+    out.group = group;
     return out;
 }
 
 @fragment
 fn fs_line(in: LineOut) -> @location(0) vec4<f32> {
-    if (in.body == u.selected.x) { return vec4<f32>(u.highlight.rgb * 0.55, 1.0); }
+    if (in.group == u.selected.x) { return vec4<f32>(u.highlight.rgb * 0.55, 1.0); }
     return u.edge;
 }
 "#;
@@ -155,7 +186,8 @@ pub struct ViewportRenderer {
     lines: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    triangles: Option<(wgpu::Buffer, u32)>,
+    /// Vertex buffer, index buffer, index count.
+    triangles: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
     edges: Option<(wgpu::Buffer, u32)>,
     targets: Option<Targets>,
     texture: Option<egui::TextureId>,
@@ -243,7 +275,8 @@ impl ViewportRenderer {
             })
         };
 
-        let mesh_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Uint32];
+        let mesh_attrs =
+            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Uint32, 3 => Uint32];
         let line_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint32];
         let mesh_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as u64,
@@ -290,22 +323,62 @@ impl ViewportRenderer {
     }
 
     pub fn set_mesh(&mut self, device: &wgpu::Device, scene: &SceneMesh) {
-        fn upload<T: Pod>(
-            device: &wgpu::Device,
-            label: &str,
-            data: &[T],
-        ) -> Option<(wgpu::Buffer, u32)> {
-            (!data.is_empty()).then(|| {
-                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(label),
-                    contents: bytemuck::cast_slice(data),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-                (buffer, data.len() as u32)
+        let mesh = &scene.mesh;
+        let upload = |label: &str, data: &[u8], usage| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: data,
+                usage,
             })
+        };
+        let owners = mesh.vertex_faces();
+        let vertices: Vec<Vertex> = (0..mesh.positions.len())
+            .map(|i| {
+                let face = owners[i];
+                let body = mesh.faces.get(face as usize).map_or(0, |f| f.body);
+                Vertex {
+                    pos: mesh.positions[i],
+                    normal: mesh.normals[i],
+                    face,
+                    group: scene.group(body),
+                }
+            })
+            .collect();
+        self.triangles = (!mesh.indices.is_empty()).then(|| {
+            (
+                upload(
+                    "viewport vertices",
+                    bytemuck::cast_slice(&vertices),
+                    wgpu::BufferUsages::VERTEX,
+                ),
+                upload(
+                    "viewport indices",
+                    bytemuck::cast_slice(&mesh.indices),
+                    wgpu::BufferUsages::INDEX,
+                ),
+                mesh.indices.len() as u32,
+            )
+        });
+        // Polylines become segment pairs for a line list.
+        let mut lines = Vec::new();
+        for run in &mesh.edges {
+            let group = scene.group(run.body);
+            let first = run.first_point as usize;
+            let points = &mesh.edge_points[first..first + run.point_count as usize];
+            for pair in points.windows(2) {
+                lines.extend(pair.iter().map(|&pos| LineVertex { pos, group }));
+            }
         }
-        self.triangles = upload(device, "viewport triangles", &scene.triangles);
-        self.edges = upload(device, "viewport edges", &scene.edges);
+        self.edges = (!lines.is_empty()).then(|| {
+            (
+                upload(
+                    "viewport edges",
+                    bytemuck::cast_slice(&lines),
+                    wgpu::BufferUsages::VERTEX,
+                ),
+                lines.len() as u32,
+            )
+        });
     }
 
     /// Renders a frame of `size` physical pixels and returns the egui texture
@@ -381,10 +454,11 @@ impl ViewportRenderer {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_pipeline(&self.bg);
             pass.draw(0..3, 0..1);
-            if let Some((buffer, count)) = &self.triangles {
+            if let Some((vertices, indices, count)) = &self.triangles {
                 pass.set_pipeline(&self.mesh);
-                pass.set_vertex_buffer(0, buffer.slice(..));
-                pass.draw(0..*count, 0..1);
+                pass.set_vertex_buffer(0, vertices.slice(..));
+                pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..*count, 0, 0..1);
             }
             if let Some((buffer, count)) = &self.edges {
                 pass.set_pipeline(&self.lines);
@@ -518,7 +592,8 @@ mod tests {
             eprintln!("no GPU adapter; skipping");
             return;
         };
-        let scene = tessellate(&sm_kernel::rebuild(&demo::document()).unwrap());
+        let model = sm_kernel::rebuild(&demo::document()).unwrap();
+        let scene = tessellate(&model, &Default::default()).unwrap();
         let mut camera = Camera::default();
         camera.scene_center = scene.center;
         camera.scene_radius = scene.radius;
@@ -545,13 +620,34 @@ mod tests {
             "{body:?}"
         );
 
-        // Same size: no new target. Selected body turns red.
-        u.selected[0] = 0;
+        // Same size: no new target. The picked face turns red.
+        let ray = camera.ray(glam::Vec2::splat(32.0), glam::Vec2::splat(64.0));
+        let (face, _) = scene.mesh.pick(ray.0.into(), ray.1.into()).unwrap();
+        u.selected[1] = face as u32;
         assert!(!r.draw(&device, &queue, [64, 64], &u));
         let frame = read(&device, &queue, &r);
         let lit = pixel(&frame, 32, 32);
         // Red plus a white specular highlight (light and eye coincide).
         assert!(lit[0] == 255 && lit[1] == lit[2] && lit[1] < 160, "{lit:?}");
+        // Without a selected feature the other faces stay grey.
+        let side = pixel(&frame, 12, 32);
+        assert!(side[0] == side[1] && side[1] == side[2], "{side:?}");
+
+        // A pick selects the face and its feature: the rest of the body is
+        // only tinted.
+        u.selected[0] = 0;
+        r.draw(&device, &queue, [64, 64], &u);
+        let frame = read(&device, &queue, &r);
+        assert_eq!(pixel(&frame, 32, 32), lit);
+        let side = pixel(&frame, 12, 32);
+        assert!(side[0] > side[1] && side[1] > 40, "{side:?}");
+
+        // Selecting the feature's group tints the whole body.
+        u.selected = [0, u32::MAX, 0, 0];
+        r.draw(&device, &queue, [64, 64], &u);
+        let frame = read(&device, &queue, &r);
+        let tinted = pixel(&frame, 32, 32);
+        assert!(tinted[0] > tinted[1] && tinted[1] > 40, "{tinted:?}");
 
         // A zero-size request is clamped instead of failing validation.
         assert!(r.draw(&device, &queue, [0, 0], &u));
