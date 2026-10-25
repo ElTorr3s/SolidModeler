@@ -877,3 +877,21 @@ fn long_chain_builds_and_drags() {
         "snaps back: {got:?} vs {target:?} {report:?}"
     );
 }
+
+#[test]
+fn over_constrained_sketch_survives_save_and_load() {
+    let mut s = Sketch::new();
+    let a = s.add_point(0.0, 0.0).unwrap();
+    let b = s.add_point(10.0, 0.0).unwrap();
+    s.add_constraint(Constraint::HorizontalDistance(a, b, 10.0))
+        .unwrap();
+    let second = s
+        .add_constraint_unchecked(Constraint::HorizontalDistance(a, b, 12.0))
+        .unwrap();
+    let json = serde_json::to_string(&s).unwrap();
+    let back: Sketch = serde_json::from_str(&json).unwrap();
+    let analysis = back.analyse();
+    assert_eq!(analysis, s.analyse());
+    assert_eq!(analysis.redundant[0].constraint, second);
+    assert!(!analysis.redundant[0].satisfied);
+}
