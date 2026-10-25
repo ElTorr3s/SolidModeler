@@ -63,10 +63,11 @@ pub const MAX_FACES: usize = 200_000;
 /// tool makes a side face per point, and classifying it meshes them all.
 const REGION_POINT_COST: u64 = 10;
 /// Total geometry work per rebuild. Meshing costs one unit per face; a truck
-/// boolean costs the square of the faces involved, because its run time grows
-/// that fast or faster. This allows roughly 30 s of booleans (about a
-/// 100-pocket plate with truck).
-pub const MAX_WORK: u64 = 6_000_000;
+/// boolean costs the product of the two solids' face counts, since it
+/// intersects every pair. Calibrated on a release build at roughly 55k units
+/// a second, so the cap is about 35 s; a plate with a 12 x 12 grid of holes
+/// uses about 300k (5 s), and 100 flush pockets about 190k (2 s).
+pub const MAX_WORK: u64 = 2_000_000;
 
 /// Tracks the work a rebuild has done, so a small hostile file can't run for
 /// hours, and lets a caller (the UI) cancel a rebuild from another thread.
@@ -84,6 +85,11 @@ impl Default for Budget {
 }
 
 impl Budget {
+    /// Work spent so far.
+    pub fn used(&self) -> u64 {
+        self.used.get()
+    }
+
     /// A budget of `limit` work units instead of [`MAX_WORK`].
     pub fn with_limit(limit: u64) -> Self {
         Self {
@@ -911,6 +917,39 @@ mod tests {
         assert_eq!(volume(&model), 8000.0 - 800.0 - 5.0 * 8.0 * 2.0);
     }
 
+    /// A 120 mm plate with a k x k grid of square cutouts from one sketch at
+    /// `z`, cut `depth` along +Z.
+    fn plate(k: usize, z: f64, depth: f64) -> PartDocument {
+        let mut doc = PartDocument::new("P", LengthUnit::Mm);
+        add_extrude(
+            &mut doc,
+            vec![rect([0.0, 0.0, 120.0, 120.0])],
+            0.0,
+            10.0,
+            BodyOperation::Join,
+        );
+        let step = 120.0 / k as f64;
+        let holes = (0..k * k)
+            .map(|i| {
+                let x = (i % k) as f64 * step + step / 4.0;
+                let y = (i / k) as f64 * step + step / 4.0;
+                rect([x, y, x + step / 2.0, y + step / 2.0])
+            })
+            .collect();
+        add_extrude(&mut doc, holes, z, depth, BodyOperation::Cut);
+        doc
+    }
+
+    #[test]
+    fn ordinary_parts_fit_the_default_budget() {
+        let side = |k: usize| 120.0 / k as f64 / 2.0;
+        let holes = rebuild_ok(&plate(12, -1.0, 12.0));
+        assert_eq!(holes.bodies.len(), 1);
+        assert_eq!(volume(&holes), 144_000.0 - 144.0 * side(12).powi(2) * 10.0);
+        let pockets = rebuild_ok(&plate(10, 10.0, -5.0));
+        assert_eq!(volume(&pockets), 144_000.0 - 100.0 * side(10).powi(2) * 5.0);
+    }
+
     #[test]
     fn work_budget_and_cancel() {
         use std::sync::atomic::AtomicBool;
@@ -930,7 +969,7 @@ mod tests {
             .collect();
         add_extrude(&mut doc, holes, -1.0, 12.0, BodyOperation::Cut);
         assert!(matches!(
-            rebuild_with(&doc, &Budget::with_limit(20_000)),
+            rebuild_with(&doc, &Budget::with_limit(2_000)),
             Err(RebuildError::TooMuchWork(_))
         ));
         // The default budget is enough for the same part.

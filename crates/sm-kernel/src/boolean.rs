@@ -197,13 +197,10 @@ fn truck_op(
     b: &Solid,
     op: impl FnOnce(&Solid, &Solid, f64) -> Option<Solid>,
 ) -> Result<Vec<Piece>, RebuildError> {
-    let faces: usize = [a, b]
-        .iter()
-        .flat_map(|s| s.boundaries())
-        .map(|s| s.len())
-        .sum();
-    // truck's boolean time grows at least with the square of the faces.
-    cx.budget.spend(cx.id, (faces as u64).saturating_pow(2))?;
+    let faces = |s: &Solid| s.boundaries().iter().map(|s| s.len() as u64).sum::<u64>();
+    // truck intersects every face of one solid with every face of the other.
+    cx.budget
+        .spend(cx.id, faces(a).saturating_mul(faces(b)).max(1))?;
     let solid = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op(a, b, cx.tol.boolean)))
         .ok()
         .flatten()

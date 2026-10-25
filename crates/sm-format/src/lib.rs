@@ -130,6 +130,12 @@ pub fn write<W: Write + Seek>(
         file: DOCUMENT,
         source,
     })?;
+    if document.len() as u64 > MAX_DOCUMENT_BYTES {
+        return Err(FormatError::TooLarge {
+            file: DOCUMENT,
+            limit: MAX_DOCUMENT_BYTES,
+        });
+    }
     let manifest = Manifest {
         format: FORMAT_ID.into(),
         version: FORMAT_VERSION,
@@ -426,6 +432,31 @@ mod tests {
         assert!(matches!(
             write(&mut buf, &doc, None),
             Err(FormatError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn refuses_to_write_what_it_cannot_read() {
+        // 100 sketches of 1000 points pretty-print to more than 8 MiB.
+        let mut doc = PartDocument::new("Big", LengthUnit::Mm);
+        for i in 0..100 {
+            doc.add_feature(
+                format!("Sketch{i}"),
+                FeatureKind::Sketch(Sketch {
+                    plane: OriginPlane::XY,
+                    offset: 0.0,
+                    profiles: vec![Profile {
+                        points: (0..1000)
+                            .map(|j| [j as f64 * 1.000001, 0.123456789])
+                            .collect(),
+                    }],
+                }),
+            );
+        }
+        let mut buf = Cursor::new(Vec::new());
+        assert!(matches!(
+            write(&mut buf, &doc, None),
+            Err(FormatError::TooLarge { file: DOCUMENT, .. })
         ));
     }
 
