@@ -976,3 +976,90 @@ fn object_hashes_are_stable() {
         "dcbebd7639489fe3402a0e057a3f4719f4cb07142ffbc060f227a738d4bd63bf"
     );
 }
+
+#[test]
+fn criss_cross_disagreements_are_conflicts() {
+    // Each branch settles the same conflict its own way while merging the
+    // other: main keeps 11, b keeps 22. Merging them again must ask, not let
+    // whichever was recorded first win.
+    let (mut h, doc) = forked();
+    let doc = commit_on(&mut h, &doc, "main", |d| set_distance(d, 2, 11.0));
+    let m1 = h.branches()["main"].clone();
+    let doc = commit_on(&mut h, &doc, "b", |d| set_distance(d, 2, 22.0));
+    let b1 = h.branches()["b"].clone();
+    let ours = Resolutions::from([(
+        ConflictKey::Feature {
+            id: FeatureId(2),
+            field: FeatureField::Definition,
+        },
+        Side::Ours,
+    )]);
+    let doc = h.checkout("main", &doc).unwrap();
+    let Ok(MergeOutcome::Merged { document: doc, .. }) = h.merge(b1.as_str(), &doc, &ours, 3)
+    else {
+        panic!("expected the resolved merge");
+    };
+    let doc = h.checkout("b", &doc).unwrap();
+    let Ok(MergeOutcome::Merged { document: doc, .. }) = h.merge(m1.as_str(), &doc, &ours, 4)
+    else {
+        panic!("expected the resolved merge");
+    };
+
+    let (main, b) = (h.branches()["main"].clone(), h.branches()["b"].clone());
+    let mut bases = h.merge_bases(&main, &b);
+    bases.sort();
+    let mut expected = vec![m1, b1];
+    expected.sort();
+    assert_eq!(bases, expected);
+
+    let doc = h.checkout("main", &doc).unwrap();
+    for (main_first, (into, other)) in [(true, ("main", "b")), (false, ("b", "main"))] {
+        let doc = h.checkout(into, &doc).unwrap();
+        let Ok(MergeOutcome::Conflicted(r)) = h.merge(other, &doc, &Resolutions::new(), 5) else {
+            panic!("expected a conflict (main first: {main_first})");
+        };
+        assert_eq!(
+            r.conflicts[0].key,
+            ConflictKey::Feature {
+                id: FeatureId(2),
+                field: FeatureField::Definition
+            }
+        );
+    }
+}
+
+#[test]
+fn id_counter_is_raised_on_load() {
+    let (mut h, doc) = forked();
+    let doc = commit_on(&mut h, &doc, "b", |d| {
+        d.add_feature("BranchSketch", sketch(5.0));
+    });
+    assert_eq!(h.next_feature_id(), FeatureId(4));
+    let mut json = serde_json::to_value(&h).unwrap();
+    json.as_object_mut().unwrap().remove("next_feature_id");
+    let loaded = reload(&json).unwrap();
+    assert_eq!(loaded.next_feature_id(), FeatureId(4));
+    // So a feature added on main after checkout can't reuse b's id 3.
+    let mut loaded = loaded;
+    let mut doc = loaded.checkout("main", &doc).unwrap();
+    assert_eq!(doc.add_feature("MainSketch", sketch(3.0)), FeatureId(4));
+}
+
+#[test]
+fn new_features_are_not_silently_rolled_in() {
+    // The marker is above Extrusion1. We add a feature below it (rolled
+    // back on our side); they move the marker to the end.
+    let mut base = block();
+    base.end_of_part = Some(FeatureId(2));
+    let mut ours = base.clone();
+    ours.add_feature("Sketch2", sketch(5.0));
+    let mut theirs = base.clone();
+    theirs.end_of_part = None;
+    let r = merge3(&base, &ours, &theirs, &Resolutions::new());
+    assert_eq!(r.conflicts.len(), 1);
+    let c = &r.conflicts[0];
+    assert_eq!(c.key, ConflictKey::EndOfPart);
+    // The conflict shows both markers, for a UI to offer.
+    assert_eq!(c.ours, Some(serde_json::json!(2)));
+    assert_eq!(c.theirs, Some(serde_json::Value::Null));
+}

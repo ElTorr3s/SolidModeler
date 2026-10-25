@@ -117,9 +117,29 @@ pub fn merge3(
     theirs: &PartDocument,
     resolutions: &Resolutions,
 ) -> MergeResult {
+    merge3_with_bases(base, &[], ours, theirs, resolutions)
+}
+
+/// [`merge3`] when `ours` and `theirs` have several equally near common
+/// ancestors, as after criss-cross merges: `base` is the one used, and
+/// `other_bases` are the rest. Anything the bases disagree on was settled
+/// differently on each side, so if ours and theirs still differ there it
+/// is a conflict, even where comparing with `base` alone would pick a side
+/// silently.
+pub fn merge3_with_bases(
+    base: &PartDocument,
+    other_bases: &[PartDocument],
+    ours: &PartDocument,
+    theirs: &PartDocument,
+    resolutions: &Resolutions,
+) -> MergeResult {
     let (theirs, renumbered) = renumber_colliding(base, ours, theirs);
     let mut m = Merger {
         resolutions,
+        forced: other_bases
+            .iter()
+            .flat_map(|other| changed_keys(base, other))
+            .collect(),
         conflicts: Vec::new(),
     };
 
@@ -175,17 +195,18 @@ pub fn merge3(
     document.repair_ids();
     if !resolutions.contains_key(&ConflictKey::EndOfPart)
         && !m.conflicts.iter().any(|c| c.key == ConflictKey::EndOfPart)
-        && (rolls_back_new(base, ours, &document) || rolls_back_new(base, &theirs, &document))
+        && (changes_new_activity(base, ours, &document)
+            || changes_new_activity(base, &theirs, &document))
     {
-        // Picking a side here keeps the marker as merged (ours) or takes
-        // theirs; either way someone has seen it.
+        // A pick for the marker settles this on the next merge (handled
+        // above), so the value returned here is not used.
         m.conflict(
             ConflictKey::EndOfPart,
             Some(&base.end_of_part),
             Some(&ours.end_of_part),
             Some(&theirs.end_of_part),
-            &(),
-            &(),
+            &ours.end_of_part,
+            &theirs.end_of_part,
         );
     }
     let invalid = document.validate().err();
@@ -210,10 +231,41 @@ fn values_changed(base: &PartDocument, side: &PartDocument) -> bool {
     })
 }
 
-/// True if a feature `side` added was active there (above its end-of-part
-/// marker) but ends up rolled back in `merged`, which would silently drop it
-/// from the part.
-fn rolls_back_new(base: &PartDocument, side: &PartDocument, merged: &PartDocument) -> bool {
+/// The conflict keys for everything that differs between two documents.
+fn changed_keys(a: &PartDocument, b: &PartDocument) -> Vec<ConflictKey> {
+    let feature = |id, field| ConflictKey::Feature { id, field };
+    let mut keys = Vec::new();
+    for change in crate::diff(a, b) {
+        match change {
+            Change::Renamed { .. } => keys.push(ConflictKey::DocumentName),
+            Change::UnitsChanged => keys.push(ConflictKey::Units),
+            Change::ParameterAdded(name)
+            | Change::ParameterRemoved(name)
+            | Change::ParameterChanged(name) => keys.push(ConflictKey::Parameter { name }),
+            Change::FeatureAdded { id, .. } | Change::FeatureRemoved { id, .. } => {
+                keys.push(feature(id, FeatureField::Existence))
+            }
+            Change::FeatureChanged { id, fields, .. } => keys.extend(fields.iter().map(|f| {
+                feature(
+                    id,
+                    match *f {
+                        "name" => FeatureField::Name,
+                        "suppressed" => FeatureField::Suppressed,
+                        _ => FeatureField::Definition,
+                    },
+                )
+            })),
+            Change::Reordered => keys.push(ConflictKey::Order),
+            Change::EndOfPartMoved => keys.push(ConflictKey::EndOfPart),
+        }
+    }
+    keys
+}
+
+/// True if a feature `side` added ends up active in `merged` while it was
+/// rolled back on that side, or the other way round. Either would silently
+/// add or drop that side's work.
+fn changes_new_activity(base: &PartDocument, side: &PartDocument, merged: &PartDocument) -> bool {
     let above_marker = |doc: &PartDocument| -> HashSet<FeatureId> {
         let end = doc
             .end_of_part
@@ -224,9 +276,8 @@ fn rolls_back_new(base: &PartDocument, side: &PartDocument, merged: &PartDocumen
     let (active_there, active_here) = (above_marker(side), above_marker(merged));
     side.features.iter().any(|f| {
         base.feature(f.id).is_none()
-            && active_there.contains(&f.id)
             && merged.feature(f.id).is_some()
-            && !active_here.contains(&f.id)
+            && active_there.contains(&f.id) != active_here.contains(&f.id)
     })
 }
 
@@ -248,10 +299,20 @@ fn reanchor(id: FeatureId, merged: &PartDocument, sides: [&PartDocument; 3]) -> 
 
 struct Merger<'a> {
     resolutions: &'a Resolutions,
+    /// Keys that are conflicts whenever ours and theirs differ.
+    forced: HashSet<ConflictKey>,
     conflicts: Vec<Conflict>,
 }
 
 impl Merger<'_> {
+    /// True if `key` (or, for a feature field, the feature as a whole) is
+    /// one the merge bases disagree on.
+    fn is_forced(&self, key: &ConflictKey) -> bool {
+        self.forced.contains(key)
+            || matches!(key, ConflictKey::Feature { id, .. } if self.forced.contains(
+                &ConflictKey::Feature { id: *id, field: FeatureField::Existence }))
+    }
+
     /// Standard three-way pick of one value.
     fn pick<T: Clone + PartialEq + Serialize>(
         &mut self,
@@ -260,10 +321,10 @@ impl Merger<'_> {
         ours: &T,
         theirs: &T,
     ) -> T {
-        if ours == theirs || theirs == base {
+        if ours == theirs || (theirs == base && !self.is_forced(&key)) {
             return ours.clone();
         }
-        if ours == base {
+        if ours == base && !self.is_forced(&key) {
             return theirs.clone();
         }
         self.conflict(key, Some(base), Some(ours), Some(theirs), ours, theirs)
@@ -277,10 +338,10 @@ impl Merger<'_> {
         ours: Option<&T>,
         theirs: Option<&T>,
     ) -> Option<T> {
-        if ours == theirs || theirs == base {
+        if ours == theirs || (theirs == base && !self.is_forced(&key)) {
             return ours.cloned();
         }
-        if ours == base {
+        if ours == base && !self.is_forced(&key) {
             return theirs.cloned();
         }
         self.conflict(key, base, ours, theirs, &ours, &theirs)
@@ -430,9 +491,10 @@ impl Merger<'_> {
                 .collect()
         };
         let (sb, so, st) = (shared(base), shared(ours), shared(theirs));
-        let primary_is_theirs = if so == st || st == sb {
+        let forced = self.is_forced(&ConflictKey::Order);
+        let primary_is_theirs = if so == st || (st == sb && !forced) {
             false
-        } else if so == sb {
+        } else if so == sb && !forced {
             true
         } else {
             self.conflict(

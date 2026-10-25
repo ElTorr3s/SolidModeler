@@ -74,8 +74,10 @@ adding a feature and deleting it again leaves nothing to record.
 Merging is three-way, at the feature level: the merge base is the nearest
 version both sides descend from, and each side's changes since then are
 combined. After criss-cross merges (each branch merged into the other) there
-can be several equally near ones; the one recorded last is used, which is
-never older than necessary.
+can be several equally near ones. The one recorded last is used as the base,
+and anything the nearest bases disagree on is a conflict whenever ours and
+theirs still differ there. Otherwise a conflict each branch settled its own
+way would be decided silently by which branch happened to commit first.
 
 - **Features** are matched by their stable id. Each feature merges field by
   field: name, suppressed, and definition (sketch geometry, extrude extent,
@@ -92,8 +94,8 @@ never older than necessary.
   feature below it and moves with that feature. If the merge deletes that
   feature, the marker moves down to the next surviving feature, or to the end
   of the part. If the merged marker would roll back a feature one side added
-  while it was active there, that is a conflict, so new work never silently
-  disappears below the marker.
+  while it was active there, or roll in one that side had left rolled back,
+  that is a conflict, so new work never silently disappears or appears.
 - **Order:** if only one side reordered the features both sides share, its
   order wins. Features only one side has are placed after the feature they
   followed on that side. When both sides added features at the same place,
@@ -106,7 +108,9 @@ never older than necessary.
   stays correct. A part edited outside its history (for example two copies of
   a file) can still collide; then their side's feature gets a fresh id and
   their references are rewritten, and the result lists every renumbering.
-  This is only safe within one history: two copies of a file (or of a
+  The counter is raised on load to the highest one any version recorded,
+  and the open document is raised to it when a file is read. This is only
+  safe within one history: two copies of a file (or of a
   project store) each continue the counter and reuse ids. Decision D1
   (schema foundations) replaces counter ids with random UUIDv7 ids, after
   which the shared counter and renumbering are removed entirely. Two identical additions count as one.

@@ -16,7 +16,9 @@ pub mod merge;
 mod objects;
 
 pub use diff::{diff, Change};
-pub use merge::{merge3, Conflict, ConflictKey, FeatureField, MergeResult, Resolutions, Side};
+pub use merge::{
+    merge3, merge3_with_bases, Conflict, ConflictKey, FeatureField, MergeResult, Resolutions, Side,
+};
 pub use objects::Hash;
 
 use objects::{Objects, ObjectsData};
@@ -346,8 +348,10 @@ impl History {
         self.require_clean(working)?;
         let ours_id = self.head_version().id.clone();
         let theirs_id = self.resolve(theirs)?;
-        let base_id = self
-            .merge_base(&ours_id, &theirs_id)
+        let bases = self.merge_bases(&ours_id, &theirs_id);
+        let base_id = bases
+            .first()
+            .cloned()
             .ok_or(HistoryError::NoCommonAncestor)?;
         if base_id == theirs_id {
             return Ok(MergeOutcome::UpToDate);
@@ -358,8 +362,13 @@ impl History {
             return Ok(MergeOutcome::FastForward(doc));
         }
 
-        let result = merge3(
+        let other_bases = bases[1..]
+            .iter()
+            .map(|id| self.document(id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let result = merge3_with_bases(
             &self.document(&base_id)?,
+            &other_bases,
             &self.document(&ours_id)?,
             &self.document(&theirs_id)?,
             resolutions,
@@ -381,18 +390,41 @@ impl History {
     }
 
     /// The nearest version both `a` and `b` descend from. After criss-cross
-    /// merges there can be several equally near ones; the rule is to take
-    /// the one recorded last. That base is never older than necessary, so
-    /// changes already merged both ways don't come back as conflicts.
+    /// merges there can be several equally near ones; this is the one
+    /// recorded last, and [`History::merge_bases`] lists them all. Merging
+    /// uses this one as the base and makes everything the others disagree
+    /// on a conflict (see [`merge3_with_bases`]).
     pub fn merge_base(&self, a: &VersionId, b: &VersionId) -> Option<VersionId> {
+        self.merge_bases(a, b).into_iter().next()
+    }
+
+    /// Every nearest common ancestor of `a` and `b` (none is an ancestor of
+    /// another), the one recorded last first.
+    pub fn merge_bases(&self, a: &VersionId, b: &VersionId) -> Vec<VersionId> {
         let of_a = self.ancestors(a);
-        // Versions are in topological order, so the common ancestor with the
-        // highest index can't be an ancestor of another common ancestor, and
-        // among several nearest ones it is the one recorded last.
-        self.ancestors(b)
-            .intersection(&of_a)
-            .max()
-            .map(|&i| self.versions[i].id.clone())
+        let mut common: Vec<usize> = self.ancestors(b).intersection(&of_a).copied().collect();
+        // Versions are in topological order: walking from the newest, each
+        // nearest ancestor is reached before its own ancestors are dropped.
+        common.sort_unstable_by(|x, y| y.cmp(x));
+        let mut dropped = HashSet::new();
+        let mut nearest = Vec::new();
+        for i in common {
+            if dropped.contains(&i) {
+                continue;
+            }
+            nearest.push(self.versions[i].id.clone());
+            let mut older = self.ancestors(&self.versions[i].id);
+            older.remove(&i);
+            dropped.extend(older);
+        }
+        nearest
+    }
+
+    /// The next feature id no branch has used. Documents opened from the
+    /// history are raised to it; callers that build the open document some
+    /// other way should do the same with [`PartDocument::reserve_ids`].
+    pub fn next_feature_id(&self) -> FeatureId {
+        FeatureId(self.next_feature_id)
     }
 
     /// `id` and every version it descends from, newest first.
@@ -625,6 +657,21 @@ impl TryFrom<HistoryData> for History {
             objects,
             next_feature_id: data.next_feature_id,
         };
+        // The counter must be above every id any version handed out, or a
+        // branch could reuse one. Each header records its document's counter,
+        // so raise the stored value to the largest (cheap: headers are small
+        // and shared between versions).
+        let mut history = history;
+        let headers: HashSet<&Hash> = history.versions.iter().map(|v| &v.tree.header).collect();
+        for header in headers {
+            #[derive(Deserialize)]
+            struct Counter {
+                #[serde(default)]
+                next_id: u32,
+            }
+            let counter: Counter = history.objects.get(header)?;
+            history.next_feature_id = history.next_feature_id.max(counter.next_id);
+        }
         // The open document is compared with the head on every checkout, so
         // a broken head is reported now rather than on first use.
         history.head_document()?;

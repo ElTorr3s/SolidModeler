@@ -303,6 +303,12 @@ pub fn read<R: Read + Seek>(mut input: R) -> Result<SmpFile, FormatError> {
         }
     };
 
+    // New features in the open part must not reuse an id another branch
+    // already handed out.
+    if let Some(history) = &history {
+        document.reserve_ids(history.next_feature_id());
+    }
+
     // Trust the cache only if it was built by this build from the document
     // actually stored. Anything else (stale, missing, unreadable, not UTF-8)
     // just means a rebuild.
@@ -577,6 +583,26 @@ mod tests {
             result,
             Err(FormatError::Json { file: HISTORY, .. })
         ));
+    }
+
+    #[test]
+    fn open_document_never_reuses_another_branchs_ids() {
+        let doc = part();
+        let mut history = History::new(&doc, "Initial", 1).unwrap();
+        history.create_branch("b", "main").unwrap();
+        let mut on_b = history.checkout("b", &doc).unwrap();
+        let used = on_b.add_feature("BranchSketch", doc.features[0].kind.clone());
+        history.commit(&on_b, "b work", 2).unwrap();
+        let on_main = history.checkout("main", &on_b).unwrap();
+
+        // Save main's document as it was before b's commit raised anything.
+        let mut buf = Cursor::new(Vec::new());
+        write_with_history(&mut buf, &doc, Some(&history), None).unwrap();
+        buf.set_position(0);
+        let mut opened = read(buf).unwrap().document;
+        assert_eq!(opened, on_main);
+        let new = opened.add_feature("MainSketch", doc.features[0].kind.clone());
+        assert!(new > used, "{new:?} must be above b's {used:?}");
     }
 
     #[test]
