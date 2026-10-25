@@ -7,6 +7,7 @@ mod app;
 mod browser;
 mod camera;
 mod demo;
+mod icons;
 mod mesh;
 mod render;
 mod theme;

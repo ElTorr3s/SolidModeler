@@ -8,6 +8,7 @@ use glam::Mat4;
 use wgpu::util::DeviceExt;
 
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+const DISPLAY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// 4x MSAA is guaranteed for these formats on every WebGPU backend.
 const SAMPLES: u32 = 4;
@@ -139,7 +140,11 @@ struct Targets {
     size: [u32; 2],
     msaa: wgpu::TextureView,
     depth: wgpu::TextureView,
+    /// sRGB view the render pass resolves into (encodes on write).
     resolve: wgpu::TextureView,
+    /// Plain view of the same texture for egui, which expects sRGB-encoded
+    /// bytes and must not decode them again on sampling.
+    display: wgpu::TextureView,
     #[cfg(test)]
     resolve_texture: wgpu::Texture,
 }
@@ -314,7 +319,7 @@ impl ViewportRenderer {
         uniforms: &Uniforms,
     ) -> egui::TextureId {
         let resized = self.draw(device, queue, size, uniforms);
-        let view = &self.targets.as_ref().expect("drawn above").resolve;
+        let view = &self.targets.as_ref().expect("drawn above").display;
         let filter = wgpu::FilterMode::Nearest;
         match self.texture {
             Some(id) if resized => {
@@ -393,7 +398,7 @@ impl ViewportRenderer {
 }
 
 fn make_targets(device: &wgpu::Device, size: [u32; 2]) -> Targets {
-    let texture = |label: &str, format, samples, usage| {
+    let texture = |label: &str, format, samples, usage, view_formats: &[wgpu::TextureFormat]| {
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d {
@@ -406,7 +411,7 @@ fn make_targets(device: &wgpu::Device, size: [u32; 2]) -> Targets {
             dimension: wgpu::TextureDimension::D2,
             format,
             usage,
-            view_formats: &[],
+            view_formats,
         })
     };
     let resolve = texture(
@@ -416,11 +421,16 @@ fn make_targets(device: &wgpu::Device, size: [u32; 2]) -> Targets {
         wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_SRC,
+        &[DISPLAY_FORMAT],
     );
     let view = |t: wgpu::Texture| t.create_view(&Default::default());
     Targets {
         size,
         resolve: resolve.create_view(&Default::default()),
+        display: resolve.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(DISPLAY_FORMAT),
+            ..Default::default()
+        }),
         #[cfg(test)]
         resolve_texture: resolve,
         msaa: view(texture(
@@ -428,12 +438,14 @@ fn make_targets(device: &wgpu::Device, size: [u32; 2]) -> Targets {
             COLOR_FORMAT,
             SAMPLES,
             wgpu::TextureUsages::RENDER_ATTACHMENT,
+            &[],
         )),
         depth: view(texture(
             "viewport depth",
             DEPTH_FORMAT,
             SAMPLES,
             wgpu::TextureUsages::RENDER_ATTACHMENT,
+            &[],
         )),
     }
 }

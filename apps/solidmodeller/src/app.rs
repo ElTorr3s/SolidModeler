@@ -268,7 +268,8 @@ impl SolidApp {
             } else if let Some(e) = &self.rebuild_error {
                 ui.colored_label(self.palette.error.egui(), format!("Rebuild failed: {e}"));
             } else {
-                ui.label(format!("{} bodies", self.scene.bodies.len()));
+                let n = self.scene.bodies.len();
+                ui.label(format!("{n} {}", if n == 1 { "body" } else { "bodies" }));
             }
             if let Some(s) = &self.status {
                 ui.separator();

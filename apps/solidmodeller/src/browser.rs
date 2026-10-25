@@ -4,6 +4,7 @@
 //! feature, and the End of Part marker sits between the active features and
 //! the rolled-back ones.
 
+use crate::icons::{icon, Icon};
 use crate::theme::Palette;
 use egui::{collapsing_header::CollapsingState, RichText, Ui};
 use sm_document::{BodyOperation, FeatureId, FeatureKind, PartDocument};
@@ -54,14 +55,14 @@ pub fn tree(doc: &PartDocument) -> Vec<Node> {
     nodes
 }
 
-const ORIGIN: [(&str, &str); 7] = [
-    ("◻", "YZ Plane"),
-    ("◻", "XZ Plane"),
-    ("◻", "XY Plane"),
-    ("↗", "X Axis"),
-    ("↗", "Y Axis"),
-    ("↗", "Z Axis"),
-    ("⏺", "Center Point"),
+const ORIGIN: [(Icon, &str); 7] = [
+    (Icon::Plane, "YZ Plane"),
+    (Icon::Plane, "XZ Plane"),
+    (Icon::Plane, "XY Plane"),
+    (Icon::Axis, "X Axis"),
+    (Icon::Axis, "Y Axis"),
+    (Icon::Axis, "Z Axis"),
+    (Icon::Point, "Center Point"),
 ];
 
 pub fn show(
@@ -71,13 +72,22 @@ pub fn show(
     palette: &Palette,
 ) -> Option<BrowserAction> {
     let mut action = None;
-    ui.label(RichText::new(format!("📦 {}", doc.name)).strong());
+    ui.horizontal(|ui| {
+        icon(ui, Icon::Part, palette, false);
+        ui.label(RichText::new(&doc.name).strong());
+    });
     ui.indent("part", |ui| {
         CollapsingState::load_with_default_open(ui.ctx(), ui.scope_id().with("origin"), false)
-            .show_header(ui, |ui| ui.label("📁 Origin"))
+            .show_header(ui, |ui| {
+                icon(ui, Icon::Folder, palette, false);
+                ui.label("Origin");
+            })
             .body(|ui| {
-                for (icon, name) in ORIGIN {
-                    ui.label(format!("{icon} {name}"));
+                for (kind, name) in ORIGIN {
+                    ui.horizontal(|ui| {
+                        icon(ui, kind, palette, false);
+                        ui.label(name);
+                    });
                 }
             });
 
@@ -98,6 +108,7 @@ pub fn show(
                         node.feature,
                         node.rolled_back,
                         selected,
+                        palette,
                         &mut action,
                     );
                 });
@@ -110,12 +121,21 @@ pub fn show(
                             node.feature,
                             node.rolled_back,
                             selected,
+                            palette,
                             &mut action,
                         )
                     })
                     .body(|ui| {
                         for &child in &node.children {
-                            row(ui, doc, child, node.rolled_back, selected, &mut action);
+                            row(
+                                ui,
+                                doc,
+                                child,
+                                node.rolled_back,
+                                selected,
+                                palette,
+                                &mut action,
+                            );
                         }
                     });
             }
@@ -128,7 +148,13 @@ pub fn show(
 }
 
 fn end_of_part(ui: &mut Ui, palette: &Palette, action: &mut Option<BrowserAction>) {
-    let response = ui.label(RichText::new("🛑 End of Part").color(palette.error.egui()));
+    let response = ui
+        .horizontal(|ui| {
+            ui.add_space(ui.spacing().indent);
+            icon(ui, Icon::EndOfPart, palette, false);
+            ui.label(RichText::new("End of Part").color(palette.error.egui()))
+        })
+        .inner;
     response.context_menu(|ui| {
         if ui.button("Move EOP to End").clicked() {
             *action = Some(BrowserAction::EndOfPartToEnd);
@@ -143,19 +169,21 @@ fn row(
     id: FeatureId,
     rolled_back: bool,
     selected: Option<FeatureId>,
+    palette: &Palette,
     action: &mut Option<BrowserAction>,
 ) {
     let Some(feature) = doc.feature(id) else {
         return;
     };
-    let icon = match &feature.kind {
-        FeatureKind::Sketch(_) => "✏",
+    let kind = match &feature.kind {
+        FeatureKind::Sketch(_) => Icon::Sketch,
         FeatureKind::Extrude(e) => match e.operation {
-            BodyOperation::Cut => "⬇",
-            _ => "⬆",
+            BodyOperation::Cut => Icon::Cut,
+            _ => Icon::Extrude,
         },
     };
-    let mut text = RichText::new(format!("{icon} {}", feature.name));
+    icon(ui, kind, palette, feature.suppressed || rolled_back);
+    let mut text = RichText::new(&feature.name);
     if feature.suppressed {
         text = text.strikethrough().weak();
     } else if rolled_back {
