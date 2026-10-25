@@ -24,6 +24,11 @@ fn pocketed_block() -> (sm_document::PartDocument, [sm_document::FeatureId; 3]) 
 
 fn no_unknown_faces(naming: &Naming) {
     for body in &naming.bodies {
+        assert!(
+            body.untraced.is_empty(),
+            "untraced faces {:?}",
+            body.untraced
+        );
         for face in &body.faces {
             assert!(
                 !matches!(face.origin.role, FaceRole::Unknown { .. }),
@@ -475,6 +480,32 @@ fn malformed_and_dangling_names_fail_safely() {
     ] {
         assert!(serde_json::from_str::<TopoName>(bad).is_err(), "{bad}");
     }
+    // Oversized lists are refused while parsing, not after allocating.
+    let origin = r#"{"feature":2,"role":"end_cap","profile":0}"#;
+    let list = |n: usize| vec![origin; n].join(",");
+    let face = |n: usize| {
+        format!(
+            r#"{{"type":"face","origin":{origin},"split":[{}]}}"#,
+            list(n)
+        )
+    };
+    assert!(serde_json::from_str::<TopoName>(&face(sm_naming::MAX_NAME_LIST)).is_ok());
+    assert!(serde_json::from_str::<TopoName>(&face(sm_naming::MAX_NAME_LIST + 1)).is_err());
+    let plain = format!(r#"{{"origin":{origin}}}"#);
+    let vertex = |n: usize| {
+        format!(
+            r#"{{"type":"vertex","faces":[{}]}}"#,
+            vec![plain.as_str(); n].join(",")
+        )
+    };
+    assert!(serde_json::from_str::<TopoName>(&vertex(sm_naming::MAX_NAME_LIST)).is_ok());
+    assert!(serde_json::from_str::<TopoName>(&vertex(sm_naming::MAX_NAME_LIST + 1)).is_err());
+    let edge = format!(
+        r#"{{"type":"edge","faces":[{plain},{plain}],"ends":[{}]}}"#,
+        list(sm_naming::MAX_NAME_LIST + 1)
+    );
+    assert!(serde_json::from_str::<TopoName>(&edge).is_err());
+
     // Well-formed but pointing at nothing.
     for dangling in [
         r#"{"type":"face","origin":{"feature":999,"role":"end_cap","profile":0}}"#,
@@ -536,4 +567,65 @@ fn plane_or_point(r: &sm_naming::NamedRebuild, e: EntityRef) -> String {
         EntityKind::Edge => format!("{:?}", edge_points(r, e)),
         EntityKind::Vertex => format!("{:?}", vertex_point(r, e)),
     }
+}
+
+#[test]
+fn a_cut_away_fragment_is_lost_not_moved_to_its_sibling() {
+    let (mut doc, [_, slot_sketch, _]) = slotted_block();
+    let r = build(&doc);
+    let left = name(&r, find_face(&r, |f| f.normal == UP && f.max[0] == 18.0));
+    // Widen the slot over the whole left part: only the right piece is left.
+    sketch_mut(&mut doc, slot_sketch).profiles = vec![rect([-5.0, -5.0, 22.0, 25.0])];
+    let r = build(&doc);
+    assert_eq!(r.naming().resolve(&left), Resolution::Lost);
+}
+
+#[test]
+fn ordinals_never_outweigh_neighbours() {
+    use sm_naming::{FaceName, FaceOrigin};
+    let origin = |feature, profile| FaceOrigin {
+        feature: sm_document::FeatureId(feature),
+        role: FaceRole::EndCap { profile },
+    };
+    let face = |split: Vec<FaceOrigin>, ordinal| FaceName {
+        origin: origin(1, 0),
+        split,
+        ordinal,
+    };
+    // Stored: neighbours {a..j} (10), ordinal 0. Candidate A shares 9 of 10
+    // with a different ordinal; candidate B shares 9 of 11 with ordinal 0.
+    let n: Vec<FaceOrigin> = (0..10).map(|p| origin(9, p)).collect();
+    let stored = TopoName::Face(face(n.clone(), Some(0)));
+    let a = face(n[..9].to_vec(), Some(1));
+    let mut b_split = n[..9].to_vec();
+    b_split.extend([origin(8, 0), origin(8, 1)]);
+    let b = face(b_split, Some(0));
+    let naming = Naming {
+        bodies: vec![sm_naming::BodyNaming {
+            faces: vec![b, a],
+            ..Default::default()
+        }],
+    };
+    // A's overlap 0.9 beats B's 9/12 = 0.75, whatever the ordinals say.
+    assert_eq!(
+        naming.resolve(&stored),
+        Resolution::Healed(EntityRef {
+            kind: EntityKind::Face,
+            body: 0,
+            index: 1
+        })
+    );
+}
+
+#[test]
+fn duplicate_exact_names_are_ambiguous() {
+    let (doc, _) = pocketed_block();
+    let r = build(&doc);
+    let mut naming = r.naming().clone();
+    let dup = naming.bodies[0].faces[0].clone();
+    naming.bodies[0].faces[1] = dup.clone();
+    assert!(matches!(
+        naming.resolve(&TopoName::Face(dup)),
+        Resolution::Ambiguous(v) if v.len() == 2
+    ));
 }

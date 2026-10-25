@@ -165,6 +165,16 @@ pub fn resolve_one(rebuilt: &NamedRebuild, n: &TopoName) -> EntityRef {
     }
 }
 
+/// Rebuilds with names, failing loudly if any face could not be traced to
+/// exactly one input face (e.g. a kernel change that merges surfaces).
 pub fn build(doc: &PartDocument) -> NamedRebuild {
-    sm_naming::rebuild_named(doc).expect("rebuild")
+    let rebuilt = sm_naming::rebuild_named(doc).expect("rebuild");
+    for body in &rebuilt.naming().bodies {
+        assert!(
+            body.untraced.is_empty(),
+            "untraced faces {:?}",
+            body.untraced
+        );
+    }
+    rebuilt
 }

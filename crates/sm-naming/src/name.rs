@@ -42,6 +42,38 @@ fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
+/// Longest list a name may hold (split neighbours, edge ends, vertex faces).
+/// Names come from untrusted files, and resolving costs time proportional to
+/// their length. Generated names are truncated to it so they always load.
+pub const MAX_NAME_LIST: usize = 1024;
+
+/// Deserializes a list, failing as soon as it exceeds [`MAX_NAME_LIST`]
+/// instead of allocating whatever length the file claims.
+fn bounded<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct Visitor<T>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Visitor<T> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "a list of at most {MAX_NAME_LIST} items")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+            let mut out = Vec::new();
+            while let Some(item) = seq.next_element()? {
+                if out.len() == MAX_NAME_LIST {
+                    return Err(serde::de::Error::invalid_length(out.len() + 1, &self));
+                }
+                out.push(item);
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_seq(Visitor(std::marker::PhantomData))
+}
+
 /// The feature and role that created a face. Booleans trim and split faces
 /// but never create new surfaces, so every face of a body has one origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -61,7 +93,11 @@ pub struct FaceOrigin {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct FaceName {
     pub origin: FaceOrigin,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "bounded"
+    )]
     pub split: Vec<FaceOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ordinal: Option<u32>,
@@ -73,7 +109,11 @@ pub struct FaceName {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EdgeName {
     pub faces: [FaceName; 2],
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "bounded"
+    )]
     pub ends: Vec<FaceOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ordinal: Option<u32>,
@@ -82,6 +122,7 @@ pub struct EdgeName {
 /// A persistent vertex name: the faces that meet at it, sorted.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct VertexName {
+    #[serde(deserialize_with = "bounded")]
     pub faces: Vec<FaceName>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ordinal: Option<u32>,

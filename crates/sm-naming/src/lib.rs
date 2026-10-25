@@ -18,14 +18,17 @@ mod naming;
 mod tools;
 mod track;
 
-pub use name::{EdgeName, FaceName, FaceOrigin, FaceRole, SketchEdge, TopoName, VertexName};
+pub use name::{
+    EdgeName, FaceName, FaceOrigin, FaceRole, SketchEdge, TopoName, VertexName, MAX_NAME_LIST,
+};
 pub use naming::{BodyNaming, Entities};
 pub use tools::{extrude_tool, revolve_tool, FaceOrigins, RevolveAxis};
 
 use sm_document::{FeatureId, PartDocument};
 use sm_kernel::{Model, RebuildError};
+use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
-use track::{BodyState, Tracker};
+use track::{Change, Tracker};
 
 /// Which kind of entity a reference points at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -103,46 +106,51 @@ impl Naming {
 
     /// Finds the entity a stored name refers to.
     pub fn resolve(&self, name: &TopoName) -> Resolution {
-        let mut candidates: Vec<(EntityRef, Option<f64>)> = Vec::new();
+        let mut scored: Vec<(EntityRef, Score)> = Vec::new();
         for (body, naming) in self.bodies.iter().enumerate() {
             let at = |kind, index| EntityRef { kind, body, index };
             match name {
-                TopoName::Face(n) => candidates.extend(
-                    naming
-                        .faces
-                        .iter()
-                        .enumerate()
-                        .map(|(i, c)| (at(EntityKind::Face, i), score_face(n, c))),
-                ),
-                TopoName::Edge(n) => candidates.extend(
-                    naming
-                        .edges
-                        .iter()
-                        .enumerate()
-                        .map(|(i, c)| (at(EntityKind::Edge, i), score_edge(n, c))),
-                ),
-                TopoName::Vertex(n) => candidates.extend(
-                    naming
-                        .vertices
-                        .iter()
-                        .enumerate()
-                        .map(|(i, c)| (at(EntityKind::Vertex, i), score_vertex(n, c))),
-                ),
+                TopoName::Face(n) => {
+                    scored.extend(naming.faces.iter().enumerate().filter_map(|(i, c)| {
+                        let touching = naming.neighbours.get(i).map(Vec::as_slice);
+                        if !still_touches(&n.split, touching) {
+                            return None;
+                        }
+                        score_face(n, c).map(|s| (at(EntityKind::Face, i), s))
+                    }))
+                }
+                TopoName::Edge(n) => {
+                    scored.extend(naming.edges.iter().enumerate().filter_map(|(i, c)| {
+                        score_edge(n, c).map(|s| (at(EntityKind::Edge, i), s))
+                    }))
+                }
+                TopoName::Vertex(n) => {
+                    scored.extend(naming.vertices.iter().enumerate().filter_map(|(i, c)| {
+                        score_vertex(n, c).map(|s| (at(EntityKind::Vertex, i), s))
+                    }))
+                }
             }
         }
-        let scored: Vec<(EntityRef, f64)> = candidates
-            .into_iter()
-            .filter_map(|(e, s)| s.map(|s| (e, s)))
+        let exact: Vec<EntityRef> = scored
+            .iter()
+            .map(|&(e, _)| e)
+            .filter(|&e| &self.name_of(e) == name)
             .collect();
-        if let Some(&(e, _)) = scored.iter().find(|(e, _)| &self.name_of(*e) == name) {
-            return Resolution::Exact(e);
+        match exact.as_slice() {
+            [e] => return Resolution::Exact(*e),
+            [_, _, ..] => return Resolution::Ambiguous(exact),
+            [] => {}
         }
-        let Some(best) = scored.iter().map(|&(_, s)| s).max_by(f64::total_cmp) else {
+        let Some(best) = scored
+            .iter()
+            .map(|&(_, s)| s)
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        else {
             return Resolution::Lost;
         };
         let top: Vec<EntityRef> = scored
             .iter()
-            .filter(|&&(_, s)| s >= best - 1e-9)
+            .filter(|&&(_, s)| s == best)
             .map(|&(e, _)| e)
             .collect();
         match top.as_slice() {
@@ -152,33 +160,93 @@ impl Naming {
     }
 }
 
+/// How well a candidate fits a stored name. Neighbour overlap decides;
+/// matching ordinals only break exact ties, since ordinals are the one
+/// unstable part of a name.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+struct Score {
+    overlap: f64,
+    ordinals: u32,
+}
+
+impl std::ops::Add for Score {
+    type Output = Score;
+    fn add(self, o: Score) -> Score {
+        Score {
+            overlap: self.overlap + o.overlap,
+            ordinals: self.ordinals + o.ordinals,
+        }
+    }
+}
+
+fn ordinal_score(a: Option<u32>, b: Option<u32>) -> Score {
+    Score {
+        overlap: 0.0,
+        ordinals: u32::from(a == b),
+    }
+}
+
+/// Overlap of two neighbour lists, or `None` when both are non-empty and
+/// share nothing: then they describe different pieces (e.g. the stored
+/// fragment was cut away and only its sibling is left), not the same piece
+/// with changed surroundings. An empty side means the face is whole on that
+/// side, which still matches.
+fn overlap(a: &[FaceOrigin], b: &[FaceOrigin]) -> Option<f64> {
+    let j = jaccard(a, b);
+    (a.is_empty() || b.is_empty() || j > 0.0).then_some(j)
+}
+
+/// A stored fragment is told apart by neighbours only it touched. A
+/// candidate that touches none of them is a different piece, typically the
+/// sibling left after the stored fragment was cut away, not the same face
+/// made whole again (which keeps touching them).
+fn still_touches(split: &[FaceOrigin], neighbours: Option<&[FaceOrigin]>) -> bool {
+    match neighbours {
+        Some(n) if !split.is_empty() => split.iter().any(|o| n.binary_search(o).is_ok()),
+        _ => true,
+    }
+}
+
 /// How well candidate `c` fits stored name `r`, or `None` if it can't be
-/// the same entity. Origins must match; split neighbours are compared by
-/// overlap, and a matching ordinal breaks remaining ties.
-fn score_face(r: &FaceName, c: &FaceName) -> Option<f64> {
+/// the same entity: origins must match and split neighbours must not
+/// contradict.
+fn score_face(r: &FaceName, c: &FaceName) -> Option<Score> {
     if r.origin != c.origin {
         return None;
     }
-    let ordinal = if r.ordinal == c.ordinal { 0.1 } else { 0.0 };
-    Some(jaccard(&r.split, &c.split) + ordinal)
+    let overlap = overlap(&r.split, &c.split)?;
+    Some(
+        Score {
+            overlap,
+            ordinals: 0,
+        } + ordinal_score(r.ordinal, c.ordinal),
+    )
 }
 
-fn score_edge(r: &EdgeName, c: &EdgeName) -> Option<f64> {
-    let straight = score_face(&r.faces[0], &c.faces[0])
-        .zip(score_face(&r.faces[1], &c.faces[1]))
-        .map(|(a, b)| a + b);
-    let crossed = score_face(&r.faces[0], &c.faces[1])
-        .zip(score_face(&r.faces[1], &c.faces[0]))
-        .map(|(a, b)| a + b);
+fn score_edge(r: &EdgeName, c: &EdgeName) -> Option<Score> {
+    let pair = |a: &FaceName, b: &FaceName, x: &FaceName, y: &FaceName| {
+        Some(score_face(a, x)? + score_face(b, y)?)
+    };
+    let straight = pair(&r.faces[0], &r.faces[1], &c.faces[0], &c.faces[1]);
+    let crossed = pair(&r.faces[0], &r.faces[1], &c.faces[1], &c.faces[0]);
     let faces = match (straight, crossed) {
-        (Some(a), Some(b)) => a.max(b),
+        (Some(a), Some(b)) => {
+            if a >= b {
+                a
+            } else {
+                b
+            }
+        }
         (a, b) => a.or(b)?,
     };
-    let ordinal = if r.ordinal == c.ordinal { 0.1 } else { 0.0 };
-    Some(faces + jaccard(&r.ends, &c.ends) + ordinal)
+    let ends = Score {
+        overlap: overlap(&r.ends, &c.ends)?,
+        ordinals: 0,
+    };
+    Some(faces + ends + ordinal_score(r.ordinal, c.ordinal))
 }
 
-fn score_vertex(r: &VertexName, c: &VertexName) -> Option<f64> {
+fn score_vertex(r: &VertexName, c: &VertexName) -> Option<Score> {
     // Cheap rejection first: stored names may come from untrusted files.
     if r.faces.len() != c.faces.len() {
         return None;
@@ -194,7 +262,10 @@ fn score_vertex(r: &VertexName, c: &VertexName) -> Option<f64> {
     // Pair faces by origin; within an origin, each stored face takes its
     // best-scoring unused candidate face.
     let mut used = HashSet::new();
-    let mut total = 0.0;
+    let mut total = Score {
+        overlap: 0.0,
+        ordinals: 0,
+    };
     for rf in &r.faces {
         let best = c
             .faces
@@ -202,12 +273,11 @@ fn score_vertex(r: &VertexName, c: &VertexName) -> Option<f64> {
             .enumerate()
             .filter(|(i, _)| !used.contains(i))
             .filter_map(|(i, cf)| score_face(rf, cf).map(|s| (i, s)))
-            .max_by(|a, b| a.1.total_cmp(&b.1))?;
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
         used.insert(best.0);
-        total += best.1;
+        total = total + best.1;
     }
-    let ordinal = if r.ordinal == c.ordinal { 0.1 } else { 0.0 };
-    Some(total + ordinal)
+    Some(total + ordinal_score(r.ordinal, c.ordinal))
 }
 
 fn jaccard(a: &[FaceOrigin], b: &[FaceOrigin]) -> f64 {
@@ -225,8 +295,8 @@ fn jaccard(a: &[FaceOrigin], b: &[FaceOrigin]) -> f64 {
 pub struct NamedRebuild {
     pub model: Model,
     naming: Naming,
-    states: Vec<(FeatureId, Vec<BodyState>)>,
-    order: Vec<FeatureId>,
+    changes: Vec<(FeatureId, Change)>,
+    position: HashMap<FeatureId, usize>,
 }
 
 impl NamedRebuild {
@@ -236,18 +306,20 @@ impl NamedRebuild {
     }
 
     /// Names for the model as `feature` sees it, i.e. after every feature
-    /// above it. A feature's own references resolve against this.
+    /// above it. A feature's own references resolve against this. An id not
+    /// in the document gives the final names.
     pub fn naming_before(&self, feature: FeatureId) -> Naming {
-        let pos = |f: FeatureId| self.order.iter().position(|&g| g == f);
-        let Some(limit) = pos(feature) else {
+        let Some(&limit) = self.position.get(&feature) else {
             return self.naming.clone();
         };
-        self.states
-            .iter()
-            .rev()
-            .find(|(f, _)| pos(*f).is_some_and(|p| p < limit))
-            .map(|(_, bodies)| track::naming(bodies))
-            .unwrap_or_default()
+        let mut bodies = Vec::new();
+        for (f, change) in &self.changes {
+            if self.position.get(f).is_none_or(|&p| p >= limit) {
+                break;
+            }
+            change.apply(&mut bodies);
+        }
+        track::naming(&bodies)
     }
 }
 
@@ -255,15 +327,15 @@ impl NamedRebuild {
 pub fn rebuild_named(doc: &PartDocument) -> Result<NamedRebuild, RebuildError> {
     let mut tracker = Tracker::new(doc);
     let model = sm_kernel::rebuild_observed(doc, &mut tracker)?;
-    let naming = tracker
-        .states
-        .last()
-        .map(|(_, bodies)| track::naming(bodies))
-        .unwrap_or_default();
     Ok(NamedRebuild {
         model,
-        naming,
-        states: tracker.states,
-        order: doc.features.iter().map(|f| f.id).collect(),
+        naming: track::naming(&tracker.bodies),
+        changes: tracker.changes,
+        position: doc
+            .features
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.id, i))
+            .collect(),
     })
 }

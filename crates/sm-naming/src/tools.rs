@@ -46,9 +46,15 @@ impl FaceOrigins {
     }
 
     /// The origin of a face with this surface. Two origins sharing one
-    /// surface would take bit-identical construction; the older feature wins.
+    /// surface would take bit-identical construction; the older feature wins
+    /// and [`FaceOrigins::count`] lets callers report the conflict.
     pub(crate) fn get(&self, key: SurfaceKey) -> Option<FaceOrigin> {
         self.by_surface.get(&key).and_then(|o| o.first()).copied()
+    }
+
+    /// How many origins claim this surface; anything but 1 is untraced.
+    pub(crate) fn count(&self, key: SurfaceKey) -> usize {
+        self.by_surface.get(&key).map_or(0, Vec::len)
     }
 
     /// Origins for the faces of `solid`, taken from `sources`.
@@ -90,8 +96,8 @@ fn sketch_edge(profiles: &[Profile], a: Point2, b: Point2) -> Option<SketchEdge>
     })
 }
 
-fn outer_profile(profiles: &[Profile], region: &Region) -> u32 {
-    sketch_edge(profiles, region.outer[0], region.outer[1]).map_or(u32::MAX, |e| e.profile)
+fn outer_profile(profiles: &[Profile], region: &Region) -> Option<u32> {
+    sketch_edge(profiles, region.outer[0], region.outer[1]).map(|e| e.profile)
 }
 
 fn segments(region: &Region) -> impl Iterator<Item = (Point2, Point2)> + '_ {
@@ -119,12 +125,12 @@ pub fn extrude_tool(
     reversed: bool,
     solid: &Solid,
 ) -> FaceOrigins {
+    // Without a known outer loop, caps stay unnamed rather than colliding
+    // with another region's caps.
     let profile = outer_profile(profiles, region);
-    let (below, above) = if reversed {
-        (FaceRole::EndCap { profile }, FaceRole::StartCap { profile })
-    } else {
-        (FaceRole::StartCap { profile }, FaceRole::EndCap { profile })
-    };
+    let start = profile.map(|profile| FaceRole::StartCap { profile });
+    let end = profile.map(|profile| FaceRole::EndCap { profile });
+    let (below, above) = if reversed { (end, start) } else { (start, end) };
     let to_2d = |p: Point3| {
         let d = p - frame.origin;
         [d.dot(frame.u), d.dot(frame.v)]
@@ -134,8 +140,8 @@ pub fn extrude_tool(
     for face in faces(solid) {
         let normal = plane_normal(&face);
         let role = match normal.map(|n| n.dot(frame.normal)) {
-            Some(d) if d < -1.0 + 1e-9 => Some(below),
-            Some(d) if d > 1.0 - 1e-9 => Some(above),
+            Some(d) if d < -1.0 + 1e-9 => below,
+            Some(d) if d > 1.0 - 1e-9 => above,
             Some(_) => {
                 let n = normal.unwrap();
                 let points: Vec<Point2> = face.vertex_iter().map(|v| to_2d(v.point())).collect();
@@ -245,9 +251,9 @@ pub fn revolve_tool(
         let angles: Vec<f64> = points.iter().filter_map(|&p| phi(p)).collect();
         let cap = !whole && !angles.is_empty() && angles.iter().all(|&a| same_angle(a, angles[0]));
         let role = if cap && same_angle(angles[0], 0.0) {
-            Some(FaceRole::StartCap { profile })
+            profile.map(|profile| FaceRole::StartCap { profile })
         } else if cap && same_angle(angles[0], angle) {
-            Some(FaceRole::EndCap { profile })
+            profile.map(|profile| FaceRole::EndCap { profile })
         } else {
             let near = |p: [f64; 2], q: [f64; 2]| (p[0] - q[0]).hypot(p[1] - q[1]) <= 1e-6;
             let segment = segments(region).find(|&(a, b)| {
@@ -465,6 +471,22 @@ mod tests {
         };
         let none = revolve_tool(FeatureId(1), &profiles, &on_axis, &frame, axis, &solid);
         assert!(faces(&solid).all(|f| none.get(surface_key(&f)).is_none()));
+    }
+
+    #[test]
+    fn caps_of_an_untraceable_region_stay_unknown() {
+        // Profiles that don't contain the region: nothing may be named
+        // after a guessed loop, so caps (and sides) are unknown and unique.
+        let (_, region, frame, face) = setup();
+        let solid = builder::tsweep(&face, frame.normal * 2.0);
+        let origins = extrude_tool(FeatureId(1), &[], &region, &frame, false, &solid);
+        let all = roles(&origins, &solid);
+        assert!(
+            all.iter().all(|r| matches!(r, FaceRole::Unknown { .. })),
+            "{all:?}"
+        );
+        let unique: BTreeSet<_> = all.iter().collect();
+        assert_eq!(unique.len(), all.len());
     }
 
     #[test]

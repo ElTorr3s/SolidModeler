@@ -1,10 +1,12 @@
 //! Turns face origins into full names for every face, edge and vertex of a
 //! body, telling apart fragments of split faces by their neighbours.
 
-use crate::name::{EdgeName, FaceName, FaceOrigin, FaceRole, VertexName};
+use crate::name::{EdgeName, FaceName, FaceOrigin, FaceRole, VertexName, MAX_NAME_LIST};
 use crate::tools::{faces, surface_key, FaceOrigins};
 use sm_document::FeatureId;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+#[cfg(test)]
+use truck_modeling::Vector3;
 use truck_modeling::{Edge, Face, Point3, Solid, Vertex};
 
 /// The faces, edges and vertices of a solid in a fixed order: faces as
@@ -68,10 +70,26 @@ pub struct BodyNaming {
     pub faces: Vec<FaceName>,
     pub edges: Vec<EdgeName>,
     pub vertices: Vec<VertexName>,
+    /// Faces whose surface matched no input face, or more than one. Their
+    /// names (and those of their edges and vertices) aren't reliable. This
+    /// stays empty while truck's booleans copy surfaces unchanged; if a
+    /// kernel change ever merges or rebuilds surfaces, it shows up here and
+    /// in the tests, rather than as silently wrong references.
+    pub untraced: Vec<usize>,
+    /// Origins of the faces next to each face, sorted. Resolution uses them
+    /// to check that a stored fragment's neighbours still touch a candidate.
+    pub neighbours: Vec<Vec<FaceOrigin>>,
 }
 
 pub(crate) fn name_body(solid: &Solid, origins: &FaceOrigins) -> BodyNaming {
     let ent = Entities::of(solid);
+    let untraced: Vec<usize> = ent
+        .faces
+        .iter()
+        .enumerate()
+        .filter(|(_, face)| origins.count(surface_key(face)) != 1)
+        .map(|(i, _)| i)
+        .collect();
     let mut unknown = 0;
     let face_origins: Vec<FaceOrigin> = ent
         .faces
@@ -155,6 +173,7 @@ pub(crate) fn name_body(solid: &Solid, origins: &FaceOrigins) -> BodyNaming {
         .map(|fs| {
             let mut names: Vec<FaceName> = fs.iter().map(|&f| faces[f].clone()).collect();
             names.sort();
+            names.truncate(MAX_NAME_LIST);
             names
         })
         .collect();
@@ -172,6 +191,11 @@ pub(crate) fn name_body(solid: &Solid, origins: &FaceOrigins) -> BodyNaming {
         faces,
         edges,
         vertices,
+        untraced,
+        neighbours: neighbours
+            .into_iter()
+            .map(|n| n.into_iter().collect())
+            .collect(),
     }
 }
 
@@ -198,7 +222,7 @@ fn disambiguate<K: Ord + Clone, N>(
             .fold(contexts[0].clone(), |acc, c| &acc & c);
         let own: Vec<Vec<FaceOrigin>> = contexts
             .iter()
-            .map(|c| c.difference(&common).copied().collect())
+            .map(|c| c.difference(&common).copied().take(MAX_NAME_LIST).collect())
             .collect();
         let mut ties: BTreeMap<&Vec<FaceOrigin>, Vec<usize>> = BTreeMap::new();
         for (k, &i) in members.iter().enumerate() {
@@ -272,6 +296,48 @@ mod tests {
         assert_eq!(names[3], ("a".into(), vec![o(3)], Some(0)));
         // A unique key needs no help.
         assert_eq!(names[4], ("b".into(), vec![], None));
+    }
+
+    #[test]
+    fn long_neighbour_lists_are_truncated_to_what_files_accept() {
+        let n = MAX_NAME_LIST as u32 + 10;
+        let names = disambiguate(
+            &["a", "a"],
+            |i| (0..n).map(|f| o(f * 2 + i as u32)).collect(),
+            |_| Point3::new(0.0, 0.0, 0.0),
+            |_, split, _| split,
+        );
+        assert_eq!(names[0].len(), MAX_NAME_LIST);
+        assert_ne!(names[0], names[1]);
+    }
+
+    #[test]
+    fn zero_or_several_matching_origins_are_reported() {
+        use truck_modeling::builder;
+        let v = builder::vertex(Point3::new(0.0, 0.0, 0.0));
+        let face = builder::tsweep(&builder::tsweep(&v, Vector3::unit_x()), Vector3::unit_y());
+        let solid = builder::tsweep(&face, Vector3::unit_z());
+        let all: Vec<Face> = faces(&solid).collect();
+
+        let mut origins = FaceOrigins::default();
+        for face in &all[1..] {
+            origins.insert(surface_key(face), o(1));
+        }
+        // Face 0 matches nothing; face 1 matches two features.
+        origins.insert(surface_key(&all[1]), o(2));
+        let naming = name_body(&solid, &origins);
+        assert_eq!(naming.untraced, [0, 1]);
+        assert!(matches!(
+            naming.faces[0].origin.role,
+            FaceRole::Unknown { .. }
+        ));
+        assert_eq!(naming.faces[1].origin, o(1), "older feature wins");
+
+        let mut clean = FaceOrigins::default();
+        for face in &all {
+            clean.insert(surface_key(face), o(1));
+        }
+        assert!(name_body(&solid, &clean).untraced.is_empty());
     }
 
     #[test]

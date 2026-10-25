@@ -5,6 +5,7 @@ use crate::tools::{extrude_tool, FaceOrigins};
 use crate::Naming;
 use sm_document::{FeatureId, FeatureKind, PartDocument};
 use sm_kernel::{BodyChange, ExtrudeTool, RebuildObserver, LINEAR_TOLERANCE};
+use std::sync::Arc;
 use truck_modeling::Solid;
 
 #[derive(Debug, Clone)]
@@ -19,14 +20,42 @@ impl BodyState {
     }
 }
 
-/// A [`RebuildObserver`] that records where every face came from, and the
-/// bodies as they stood after each feature.
+/// One step of the rebuild, as the tracker logs it.
+#[derive(Debug, Clone)]
+pub(crate) enum Change {
+    Created(usize, Arc<BodyState>),
+    Modified(usize, Arc<BodyState>),
+    Removed(usize),
+}
+
+impl Change {
+    pub fn apply(&self, bodies: &mut Vec<Arc<BodyState>>) {
+        match self {
+            Change::Created(i, b) => bodies.insert((*i).min(bodies.len()), b.clone()),
+            Change::Modified(i, b) => {
+                if let Some(slot) = bodies.get_mut(*i) {
+                    *slot = b.clone();
+                }
+            }
+            Change::Removed(i) => {
+                if *i < bodies.len() {
+                    bodies.remove(*i);
+                }
+            }
+        }
+    }
+}
+
+/// A [`RebuildObserver`] that records where every face came from. It logs
+/// each body change rather than copying all bodies per feature, so memory
+/// grows with the number of booleans, not features times bodies; the state
+/// at any point in the history is recovered by replaying the log.
 pub(crate) struct Tracker<'d> {
     doc: &'d PartDocument,
     tool: FaceOrigins,
-    bodies: Vec<BodyState>,
-    /// Bodies after each feature that changed them, in history order.
-    pub states: Vec<(FeatureId, Vec<BodyState>)>,
+    pub bodies: Vec<Arc<BodyState>>,
+    /// Every body change, in history order.
+    pub changes: Vec<(FeatureId, Change)>,
 }
 
 impl<'d> Tracker<'d> {
@@ -35,15 +64,13 @@ impl<'d> Tracker<'d> {
             doc,
             tool: FaceOrigins::default(),
             bodies: Vec::new(),
-            states: Vec::new(),
+            changes: Vec::new(),
         }
     }
 
-    fn record(&mut self, feature: FeatureId) {
-        match self.states.last_mut() {
-            Some((f, bodies)) if *f == feature => bodies.clone_from(&self.bodies),
-            _ => self.states.push((feature, self.bodies.clone())),
-        }
+    fn record(&mut self, feature: FeatureId, change: Change) {
+        change.apply(&mut self.bodies);
+        self.changes.push((feature, change));
     }
 }
 
@@ -74,29 +101,27 @@ impl RebuildObserver for Tracker<'_> {
             solid: solid.clone(),
             origins: std::mem::take(&mut self.tool),
         };
-        self.bodies.insert(body.min(self.bodies.len()), state);
-        self.record(feature);
+        self.record(feature, Change::Created(body, Arc::new(state)));
     }
 
     fn body_modified(&mut self, feature: FeatureId, body: usize, change: &BodyChange<'_>) {
-        let Some(state) = self.bodies.get_mut(body) else {
+        let Some(state) = self.bodies.get(body) else {
             return;
         };
-        state.origins = FaceOrigins::carried(change.after, &[&state.origins, &self.tool]);
-        state.solid = change.after.clone();
-        self.record(feature);
+        let state = BodyState {
+            origins: FaceOrigins::carried(change.after, &[&state.origins, &self.tool]),
+            solid: change.after.clone(),
+        };
+        self.record(feature, Change::Modified(body, Arc::new(state)));
     }
 
     fn body_removed(&mut self, feature: FeatureId, body: usize) {
-        if body < self.bodies.len() {
-            self.bodies.remove(body);
-        }
-        self.record(feature);
+        self.record(feature, Change::Removed(body));
     }
 }
 
-pub(crate) fn naming(bodies: &[BodyState]) -> Naming {
+pub(crate) fn naming(bodies: &[Arc<BodyState>]) -> Naming {
     Naming {
-        bodies: bodies.iter().map(BodyState::naming).collect(),
+        bodies: bodies.iter().map(|b| b.naming()).collect(),
     }
 }
