@@ -895,3 +895,154 @@ fn over_constrained_sketch_survives_save_and_load() {
     assert_eq!(analysis.redundant[0].constraint, second);
     assert!(!analysis.redundant[0].satisfied);
 }
+
+/// The sparse analysis agrees with dense Gram–Schmidt on rank, free
+/// variables and which equations are redundant, over many random solved
+/// sketches mixing every constraint kind, including repeated ones.
+#[test]
+fn sparse_analysis_matches_dense_oracle() {
+    let mut seed: u64 = 0x5eed;
+    let mut rand = move || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as f64 / (1u64 << 31) as f64
+    };
+    let mut compared = 0;
+    let mut saw_redundant = 0;
+    for _ in 0..500 {
+        let mut s = Sketch::new();
+        let mut pts = vec![s.origin()];
+        let mut lines = Vec::new();
+        let mut rounds = Vec::new();
+        for _ in 0..3 + (rand() * 6.0) as usize {
+            let a = s.add_point(rand() * 50.0, rand() * 50.0).unwrap();
+            let b = s.add_point(rand() * 50.0, rand() * 50.0).unwrap();
+            pts.extend([a, b]);
+            lines.push(s.add_line(a, b).unwrap());
+        }
+        for _ in 0..(rand() * 4.0) as usize {
+            let c = s.add_point(rand() * 50.0, rand() * 50.0).unwrap();
+            pts.push(c);
+            if rand() < 0.5 {
+                rounds.push(s.add_circle(c, 1.0 + rand() * 9.0).unwrap());
+            } else {
+                let a = s.add_point(rand() * 50.0, rand() * 50.0).unwrap();
+                let b = s.add_point(rand() * 50.0, rand() * 50.0).unwrap();
+                pts.extend([a, b]);
+                rounds.push(s.add_arc(c, a, b).unwrap());
+            }
+        }
+        let curves: Vec<CurveId> = lines.iter().chain(&rounds).copied().collect();
+        for _ in 0..(rand() * 25.0) as usize {
+            let mut ix = |len: usize| (rand() * len as f64) as usize % len;
+            let (p, q) = (pts[ix(pts.len())], pts[ix(pts.len())]);
+            let (l1, l2) = (lines[ix(lines.len())], lines[ix(lines.len())]);
+            let (c1, c2) = (curves[ix(curves.len())], curves[ix(curves.len())]);
+            let r = if rounds.is_empty() {
+                c1
+            } else {
+                rounds[ix(rounds.len())]
+            };
+            let v = 1.0 + rand() * 20.0;
+            let c = match (rand() * 20.0) as usize {
+                0 => Constraint::Coincident(p, q),
+                1 => Constraint::PointOnCurve(p, c1),
+                2 => Constraint::Horizontal(l1),
+                3 => Constraint::Vertical(l1),
+                4 => Constraint::HorizontalAlign(p, q),
+                5 => Constraint::Parallel(l1, l2),
+                6 => Constraint::Perpendicular(l1, l2),
+                7 => Constraint::Collinear(l1, l2),
+                8 => Constraint::Tangent(c1, c2),
+                9 => Constraint::Equal(c1, c2),
+                10 => Constraint::Midpoint(p, l1),
+                11 => Constraint::Symmetric(p, q, l1),
+                12 => Constraint::Fix(Entity::Point(p)),
+                13 => Constraint::Distance(p, q, v),
+                14 => Constraint::HorizontalDistance(p, q, v),
+                15 => Constraint::PointLineDistance(p, l1, v),
+                16 => Constraint::Angle(l1, l2, rand() * 3.0),
+                17 => Constraint::Radius(r, v),
+                18 => Constraint::Concentric(c1, c2),
+                _ => Constraint::Fix(Entity::Curve(c1)),
+            };
+            let _ = s.add_constraint_unchecked(c);
+        }
+        if !s.solve().converged {
+            continue;
+        }
+
+        let eqs = s.equations();
+        let unknown: Vec<bool> = s.grounded.iter().map(|g| !g).collect();
+        let mut col = vec![usize::MAX; s.vars.len()];
+        for cluster in solver::clusters(&eqs, &unknown) {
+            let mut order: Vec<usize> = (0..cluster.eqs.len()).collect();
+            order.sort_by_key(|&k| eqs[cluster.eqs[k]].owner);
+            let sparse = solver::analyse_sparse(&s.vars, &eqs, &cluster, &order, &mut col);
+            let dense = solver::analyse_dense(&s.vars, &eqs, &cluster, &order, &mut col);
+            assert_eq!(sparse.rank, dense.rank);
+            assert_eq!(sparse.free_vars, dense.free_vars);
+            let ids =
+                |a: &solver::ClusterAnalysis| a.redundant.iter().map(|r| r.0).collect::<Vec<_>>();
+            assert_eq!(ids(&sparse), ids(&dense));
+            compared += 1;
+            saw_redundant += sparse.redundant.len();
+        }
+    }
+    assert!(
+        compared > 300 && saw_redundant > 30,
+        "{compared} clusters, {saw_redundant} redundant"
+    );
+}
+
+#[test]
+fn large_chain_is_analysed_sparsely() {
+    // 600 lines in one cluster: past the dense analysis size, so this runs
+    // the sparse path end to end.
+    let mut s = Sketch::new();
+    let mut prev = s.origin();
+    let mut last_dim = None;
+    for i in 0..600 {
+        let [x, y] = s.point(prev).unwrap();
+        let next = if i % 2 == 0 {
+            s.add_point(x + 9.0, y + 0.5).unwrap()
+        } else {
+            s.add_point(x + 0.5, y + 9.0).unwrap()
+        };
+        let line = s.add_line(prev, next).unwrap();
+        let dir = if i % 2 == 0 {
+            Constraint::Horizontal(line)
+        } else {
+            Constraint::Vertical(line)
+        };
+        s.add_constraint_unchecked(dir).unwrap();
+        last_dim = Some(
+            s.add_constraint_unchecked(Constraint::Distance(prev, next, 10.0))
+                .unwrap(),
+        );
+        prev = next;
+    }
+    assert!(s.solve().converged);
+    let a = s.analyse();
+    assert!(!a.too_large);
+    assert_eq!(a.dof, 0);
+    assert_eq!(a.status, ConstraintStatus::FullyConstrained);
+
+    // A repeated dimension at the far end is found and blamed correctly.
+    let before_last = s.points().nth(599).unwrap();
+    let extra = s
+        .add_constraint_unchecked(Constraint::Distance(before_last, prev, 10.0))
+        .unwrap();
+    let a = s.analyse();
+    assert_eq!(a.status, ConstraintStatus::OverConstrained);
+    assert_eq!(a.redundant.len(), 1);
+    assert_eq!(a.redundant[0].constraint, extra);
+    assert!(a.redundant[0].conflicts_with.contains(&last_dim.unwrap()));
+
+    s.remove_constraint(extra).unwrap();
+    s.remove_constraint(last_dim.unwrap()).unwrap();
+    let a = s.analyse();
+    assert_eq!(a.dof, 1);
+    assert_eq!(a.free_points, vec![prev]);
+}

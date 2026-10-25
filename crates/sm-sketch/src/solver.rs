@@ -110,7 +110,7 @@ impl Default for SolveSettings {
 /// freezing the program: ordinary profiles are far below it.
 pub(crate) const MAX_FACTOR_WORK: f64 = 2e8;
 
-/// Most work [`analyse_cluster`]'s dense Gram–Schmidt may do on one cluster.
+/// Most work the analysis may do on one cluster.
 pub(crate) const MAX_ANALYSIS_WORK: f64 = 2e9;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -430,15 +430,235 @@ pub(crate) struct ClusterAnalysis {
     pub too_large: bool,
 }
 
-/// Relative size below which a Jacobian row counts as dependent on earlier
-/// rows. Equations are scaled so their gradients are of order one.
-const RANK_TOLERANCE: f64 = 1e-8;
+/// Clusters up to this much dense work (`m·n·min(m, n)`) are analysed with
+/// [`analyse_dense`], larger ones with [`analyse_sparse`].
+const DENSE_ANALYSIS_WORK: f64 = 1e7;
 
-/// Finds the rank, free variables and redundant equations of a cluster by
-/// Gram–Schmidt over its Jacobian rows in `order` (indices into
-/// `cluster.eqs`). Earlier rows win, so the equation reported as redundant is
-/// the later one, matching Inventor blaming the newest constraint.
+/// Finds the rank, free variables and redundant equations of a cluster, in
+/// `order` (indices into `cluster.eqs`), with whichever method suits its
+/// size.
 pub(crate) fn analyse_cluster(
+    x: &[f64],
+    eqs: &[Equation],
+    cluster: &Cluster,
+    order: &[usize],
+    col: &mut [usize],
+) -> ClusterAnalysis {
+    let (m, n) = (cluster.eqs.len(), cluster.vars.len());
+    if (m * n) as f64 * m.min(n) as f64 <= DENSE_ANALYSIS_WORK {
+        analyse_dense(x, eqs, cluster, order, col)
+    } else {
+        analyse_sparse(x, eqs, cluster, order, col)
+    }
+}
+
+/// Relative leftover below which the analysis calls a row dependent
+/// on the rows before it.
+const RANK_TOLERANCE: f64 = 1e-6;
+
+/// Rows whose Cholesky pivot is below this fraction of their squared norm
+/// get an exact residual check before being called independent or not.
+const PIVOT_SCREEN: f64 = 1e-4;
+
+/// A variable is free when at least this fraction of its unit vector lies
+/// outside the row space.
+const FREE_TOLERANCE: f64 = 1e-6;
+
+/// Finds the rank, free variables and redundant equations of a cluster.
+///
+/// Rows are taken in `order` (indices into `cluster.eqs`), scaled to unit
+/// length, and the Gram matrix `J Jᵀ` is Cholesky-factored row by row in a
+/// skyline, which is Gram–Schmidt in disguise: a row whose pivot vanishes is
+/// a combination of the rows before it. Earlier rows win, so the equation
+/// reported as redundant is the later one, matching Inventor blaming the
+/// newest constraint. Pivots below [`PIVOT_SCREEN`] are confirmed with an
+/// exact residual. Working on `J Jᵀ` squares the conditioning, so small
+/// clusters use [`analyse_dense`] instead.
+pub(crate) fn analyse_sparse(
+    x: &[f64],
+    eqs: &[Equation],
+    cluster: &Cluster,
+    order: &[usize],
+    col: &mut [usize],
+) -> ClusterAnalysis {
+    let n = cluster.vars.len();
+    if n == 0 {
+        // No unknowns: every equation here is either trivially redundant or
+        // impossible; both read as redundant.
+        return ClusterAnalysis {
+            redundant: cluster.eqs.iter().map(|&e| (e, Vec::new())).collect(),
+            ..Default::default()
+        };
+    }
+    set_columns(col, cluster);
+    let raw = sparse_rows(x, eqs, cluster, col);
+    clear_columns(col, cluster);
+
+    // Unit rows in analysis order; `None` for rows with no usable slope.
+    let m = order.len();
+    let rows: Vec<Option<Vec<(usize, f64)>>> = order
+        .iter()
+        .map(|&p| {
+            let r = &raw[p];
+            let norm = r.iter().map(|&(_, d)| d * d).sum::<f64>().sqrt();
+            (norm.is_finite() && norm >= 1e-12)
+                .then(|| r.iter().map(|&(c, d)| (c, d / norm)).collect())
+        })
+        .collect();
+    let mut col_rows: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, r) in rows.iter().enumerate() {
+        for &(c, _) in r.iter().flatten() {
+            col_rows[c].push(i);
+        }
+    }
+    let first: Vec<usize> = (0..m)
+        .map(|i| {
+            rows[i]
+                .iter()
+                .flatten()
+                .flat_map(|&(c, _)| col_rows[c].iter().copied())
+                .filter(|&j| j <= i)
+                .min()
+                .unwrap_or(i)
+        })
+        .collect();
+    let mut start = Vec::with_capacity(m);
+    let mut profile = 0;
+    let mut work = 0.0;
+    for (i, &f) in first.iter().enumerate() {
+        start.push(profile);
+        profile += i - f + 1;
+        work += ((i - f + 1) as f64).powi(2);
+    }
+    if work + (n as f64) * (profile as f64) > MAX_ANALYSIS_WORK {
+        return ClusterAnalysis {
+            too_large: true,
+            ..Default::default()
+        };
+    }
+    let at = |i: usize, j: usize| start[i] + j - first[i];
+    let dot = |a: &[(usize, f64)], b: &[(usize, f64)]| {
+        let (mut p, mut q, mut sum) = (0, 0, 0.0);
+        while p < a.len() && q < b.len() {
+            match a[p].0.cmp(&b[q].0) {
+                std::cmp::Ordering::Less => p += 1,
+                std::cmp::Ordering::Greater => q += 1,
+                std::cmp::Ordering::Equal => {
+                    sum += a[p].1 * b[q].1;
+                    p += 1;
+                    q += 1;
+                }
+            }
+        }
+        sum
+    };
+
+    let mut l = vec![0.0; profile];
+    let mut accepted = vec![false; m];
+    let mut out = ClusterAnalysis::default();
+    let mut resid = vec![0.0; n];
+    for i in 0..m {
+        let Some(ri) = &rows[i] else {
+            out.redundant.push((cluster.eqs[order[i]], Vec::new()));
+            continue;
+        };
+        for j in first[i]..i {
+            let v = match (&rows[j], accepted[j]) {
+                (Some(rj), true) => {
+                    let lo = first[i].max(first[j]);
+                    let s: f64 = (lo..j).map(|k| l[at(i, k)] * l[at(j, k)]).sum();
+                    (dot(ri, rj) - s) / l[at(j, j)]
+                }
+                _ => 0.0,
+            };
+            l[at(i, j)] = v;
+        }
+        let pivot = 1.0 - (first[i]..i).map(|k| l[at(i, k)].powi(2)).sum::<f64>();
+        if pivot > PIVOT_SCREEN {
+            l[at(i, i)] = pivot.sqrt();
+            accepted[i] = true;
+            continue;
+        }
+        // Possibly dependent: express the row in the accepted rows, c =
+        // L⁻ᵀ ℓ, and measure what is left over exactly.
+        let mut c = vec![0.0; i];
+        c[first[i]..i].copy_from_slice(&l[at(i, first[i])..at(i, i)]);
+        for p in (0..i).rev() {
+            if !accepted[p] {
+                c[p] = 0.0;
+                continue;
+            }
+            c[p] /= l[at(p, p)];
+            for k in first[p]..p {
+                c[k] -= l[at(p, k)] * c[p];
+            }
+        }
+        for &(col_index, d) in ri {
+            resid[col_index] = d;
+        }
+        for (p, &cp) in c.iter().enumerate() {
+            if cp != 0.0 {
+                for &(col_index, d) in rows[p].iter().flatten() {
+                    resid[col_index] -= cp * d;
+                }
+            }
+        }
+        let rest = resid.iter().map(|v| v * v).sum::<f64>().sqrt();
+        resid.iter_mut().for_each(|v| *v = 0.0);
+        if rest > RANK_TOLERANCE {
+            l[at(i, i)] = rest.max(pivot.max(0.0).sqrt());
+            accepted[i] = true;
+            continue;
+        }
+        let largest = c.iter().fold(0.0f64, |acc, v| acc.max(v.abs()));
+        let depends = (0..i)
+            .filter(|&p| accepted[p] && c[p].abs() > 1e-6 * largest)
+            .map(|p| cluster.eqs[order[p]])
+            .collect();
+        out.redundant.push((cluster.eqs[order[i]], depends));
+        for k in first[i]..=i {
+            l[at(i, k)] = 0.0;
+        }
+    }
+    out.rank = accepted.iter().filter(|&&a| a).count();
+
+    // A variable is pinned when its unit vector lies in the row space:
+    // |P e_c|² = |L⁻¹ J e_c|² over the accepted rows.
+    let mut z = vec![0.0; m];
+    for (c, touching) in col_rows.iter().enumerate() {
+        let Some(&lo) = touching.first() else {
+            out.free_vars.push(cluster.vars[c]);
+            continue;
+        };
+        z.iter_mut().for_each(|v| *v = 0.0);
+        for &i in touching {
+            if accepted[i] {
+                z[i] = rows[i]
+                    .iter()
+                    .flatten()
+                    .find(|&&(cc, _)| cc == c)
+                    .map_or(0.0, |&(_, d)| d);
+            }
+        }
+        let mut inside = 0.0;
+        for i in lo..m {
+            if !accepted[i] {
+                continue;
+            }
+            let s: f64 = (first[i]..i).map(|k| l[at(i, k)] * z[k]).sum();
+            z[i] = (z[i] - s) / l[at(i, i)];
+            inside += z[i] * z[i];
+        }
+        if 1.0 - inside > FREE_TOLERANCE {
+            out.free_vars.push(cluster.vars[c]);
+        }
+    }
+    out
+}
+
+/// Dense Gram–Schmidt version of [`analyse_sparse`] with the same
+/// tolerances: the most accurate, and fast for small clusters.
+pub(crate) fn analyse_dense(
     x: &[f64],
     eqs: &[Equation],
     cluster: &Cluster,
@@ -529,7 +749,7 @@ pub(crate) fn analyse_cluster(
         .vars
         .iter()
         .enumerate()
-        .filter(|&(c, _)| 1.0 - basis.iter().map(|q| q[c] * q[c]).sum::<f64>() > 1e-9)
+        .filter(|&(c, _)| 1.0 - basis.iter().map(|q| q[c] * q[c]).sum::<f64>() > FREE_TOLERANCE)
         .map(|(_, &v)| v)
         .collect();
     out

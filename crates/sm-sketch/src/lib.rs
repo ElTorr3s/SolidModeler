@@ -494,6 +494,7 @@ impl TryFrom<SketchFile> for Sketch {
 
     fn try_from(f: SketchFile) -> Result<Self, SketchError> {
         use SketchError::Corrupt;
+        // The origin isn't in the file but counts towards MAX_POINTS.
         if f.points.len() >= MAX_POINTS
             || f.curves.len() > MAX_CURVES
             || f.constraints.len() > MAX_CONSTRAINTS
