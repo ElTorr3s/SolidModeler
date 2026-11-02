@@ -7,6 +7,7 @@ mod app;
 mod browser;
 mod camera;
 mod demo;
+mod gpu;
 mod icons;
 mod mesh;
 mod render;
@@ -43,7 +44,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("SolidModeller")
             // Hyprland matches window rules on the Wayland app id.
@@ -53,6 +54,7 @@ fn main() -> ExitCode {
             .with_drag_and_drop(true),
         ..Default::default()
     };
+    options.wgpu_options = gpu::configure(options.wgpu_options);
     let result = eframe::run_native(
         "SolidModeller",
         options,

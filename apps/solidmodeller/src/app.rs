@@ -109,7 +109,10 @@ impl SolidApp {
             title: String::new(),
             camera: Camera::default(),
             fit_on_next_frame: true,
-            renderer: ViewportRenderer::new(&render_state.device),
+            renderer: ViewportRenderer::new(
+                &render_state.device,
+                render_state.adapter.get_downlevel_capabilities().flags,
+            ),
             last_frame: None,
             texture: None,
             mesh_version: 0,
