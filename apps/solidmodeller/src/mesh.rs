@@ -190,7 +190,9 @@ mod tests {
     /// triangle winds outward.
     fn volume(mesh: &Mesh) -> f32 {
         mesh.indices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|t| {
                 let [a, b, c] = [t[0], t[1], t[2]].map(|i| Vec3::from(mesh.positions[i as usize]));
                 a.dot(b.cross(c)) / 6.0

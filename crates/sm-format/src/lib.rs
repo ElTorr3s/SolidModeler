@@ -172,7 +172,7 @@ pub fn write<W: Write + Seek>(
     write_with_history(out, doc, None, cached_step)
 }
 
-/// [`write`], also storing the part's version history.
+/// [`write()`], also storing the part's version history.
 pub fn write_with_history<W: Write + Seek>(
     out: W,
     doc: &PartDocument,
