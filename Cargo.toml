@@ -5,10 +5,18 @@ members = ["crates/*", "apps/*"]
 # `--workspace` once OpenCascade is installed.
 default-members = [
     "crates/sm-document",
+    "crates/sm-expr",
     "crates/sm-format",
+    "crates/sm-history",
+    "crates/sm-ids",
     "crates/sm-kernel",
+    "crates/sm-mesh",
+    "crates/sm-naming",
+    "crates/sm-naming-types",
+    "crates/sm-sketch",
     "crates/sm-step",
     "apps/smcli",
+    "apps/solidmodeller",
 ]
 
 [workspace.package]
@@ -19,13 +27,21 @@ repository = "https://github.com/eltorr3s/solidmodeler"
 
 [workspace.dependencies]
 sm-document = { path = "crates/sm-document" }
+sm-expr = { path = "crates/sm-expr" }
+sm-ids = { path = "crates/sm-ids" }
 sm-format = { path = "crates/sm-format" }
+sm-history = { path = "crates/sm-history" }
 sm-kernel = { path = "crates/sm-kernel" }
+sm-mesh = { path = "crates/sm-mesh" }
+sm-naming = { path = "crates/sm-naming" }
+sm-naming-types = { path = "crates/sm-naming-types" }
 sm-step = { path = "crates/sm-step" }
 sm-occt = { path = "crates/sm-occt" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
+blake3 = { version = "1", default-features = false, features = ["std"] }
 thiserror = "2"
+uuid = { version = "1.29.0", features = ["v7", "serde"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 truck-modeling = "0.6"
 truck-stepio = "0.3"
