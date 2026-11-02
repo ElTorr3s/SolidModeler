@@ -41,3 +41,6 @@ Linux/Wayland with first-class Omarchy support.
    - Next: local project manager in the style of Onshape (project folders,
      project-wide releases, where-used across parts and assemblies, a
      version manager UI).
+
+Progress against Inventor and SolidWorks, feature by feature, is tracked in
+[feature-parity.md](feature-parity.md), which also proposes the next steps.
