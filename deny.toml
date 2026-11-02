@@ -20,6 +20,12 @@ ignore = [
     { id = "RUSTSEC-2026-0197", reason = "cgmath swap_columns unsound; not called; removed with the OCCT backend" },
     # Build-time only (proc macro used by ruststep-derive <- truck-stepio).
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained; compile-time only, via truck-stepio" },
+    # zbus 5's helper crates, folded into zbus 6. The app uses zbus only to
+    # read the desktop portal's colour scheme from the local session bus.
+    # Moving to zbus 6 means porting off its removed blocking API.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant merged into zbus 6; portal colour-scheme read only" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names merged into zbus 6; portal colour-scheme read only" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive merged into zbus 6; portal colour-scheme read only" },
 ]
 
 [licenses]
@@ -36,6 +42,12 @@ allow = [
     "Zlib",
 ]
 confidence-threshold = 0.9
+# egui's bundled default fonts are under the SIL Open Font License and the
+# Ubuntu Font Licence, both of which allow bundling them with software
+# under any license.
+exceptions = [
+    { name = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
+]
 
 [licenses.private]
 ignore = true
