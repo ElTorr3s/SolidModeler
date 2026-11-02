@@ -243,6 +243,14 @@ fn sandbox_blocks_files_processes_and_network() {
         "write_file=denied",
         "exec=denied",
         "socket=denied",
+        "signal_self=allowed",
+        "signal_thread_self=allowed",
+        "signal_parent=denied",
+        "signal_init=denied",
+        "signal_everyone=denied",
+        "signal_by_tid=denied",
+        "pidfd=denied",
+        "openat2=denied",
         "thread=allowed",
         "allocate=allowed",
         "occt=allowed",
@@ -251,5 +259,114 @@ fn sandbox_blocks_files_processes_and_network() {
             report.lines().any(|l| l == line),
             "expected {line} in:\n{report}"
         );
+    }
+}
+
+/// Worker output in the framed format (see `step.rs`) holding one body.
+fn frame(name: &str, brep: &[u8]) -> Vec<u8> {
+    let mut out = b"SMSW\x02\x00".to_vec();
+    out.extend(1u32.to_le_bytes());
+    out.extend((name.len() as u32).to_le_bytes());
+    out.extend(name.as_bytes());
+    out.push(0);
+    out.extend([0u8; 24]);
+    out.push(0);
+    out.extend((brep.len() as u64).to_le_bytes());
+    out.extend(brep);
+    out
+}
+
+/// A stand-in for a compromised worker: a script that ignores the file and
+/// prints `output`.
+fn fake_worker(dir: &Path, output: &[u8]) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let data = dir.join("output.bin");
+    std::fs::write(&data, output).unwrap();
+    let script = dir.join("fake-worker");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncat > /dev/null\nexec cat '{}'\n",
+            data.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+#[test]
+fn hostile_worker_output_is_screened_before_opencascade() {
+    let file = std::fs::read(corpus_dir().join("occt/box.step")).unwrap();
+    let good = import_step(&file, &opts()).unwrap();
+    let brep = good.bodies[0].shape.to_brep().unwrap();
+    let dir = std::env::temp_dir().join(format!("sm-fake-worker-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // The real B-rep, relayed by the fake worker, still imports.
+    let o = ImportOptions {
+        worker: Some(fake_worker(&dir, &frame("box", &brep))),
+        ..opts()
+    };
+    assert_eq!(import_step(&file, &o).unwrap().bodies.len(), 1);
+
+    // A shape reference past the end of the table: OpenCascade's reader
+    // would index out of bounds. The parent rejects it unread.
+    let mut bad = brep.clone();
+    let n = bad.len();
+    bad[n - 8..n - 4].copy_from_slice(&i32::MIN.to_le_bytes());
+    // A count that would make OpenCascade allocate gigabytes.
+    let mut huge = brep.clone();
+    let at = huge.windows(9).position(|w| w == b"Curve2ds ").unwrap() + 9;
+    let end = at + huge[at..].iter().position(|&c| c == b'\n').unwrap();
+    huge.splice(at..end, b"2000000000".iter().copied());
+    for (what, bytes) in [
+        ("reference", bad),
+        ("count", huge),
+        ("junk", vec![0xAB; 4096]),
+    ] {
+        let o = ImportOptions {
+            worker: Some(fake_worker(&dir, &frame("box", &bytes))),
+            ..opts()
+        };
+        let err = import_step(&file, &o).unwrap_err().to_string();
+        assert!(err.contains("worker B-rep rejected"), "{what}: {err}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn corpus_solids_survive_damage_without_crashing() {
+    // Every imported solid passes the screen; random damage to its bytes is
+    // rejected or reads cleanly, never crashes.
+    let mut seed = 0x853c_49e6_748f_ea9bu64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for dir in ["occt", "external"] {
+        for entry in std::fs::read_dir(corpus_dir().join(dir)).unwrap() {
+            let path = entry.unwrap().path();
+            if !matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("step" | "stp")
+            ) {
+                continue;
+            }
+            let import = import_step(&std::fs::read(&path).unwrap(), &opts()).unwrap();
+            for body in import.bodies.iter().take(3) {
+                let bytes = body.shape.to_brep().unwrap();
+                let back = sm_occt::Shape::load_brep(&bytes).unwrap();
+                assert_eq!(back.faces().len(), body.shape.faces().len());
+                for _ in 0..200 {
+                    let mut m = bytes.clone();
+                    let i = next() as usize % m.len();
+                    m[i] = next() as u8;
+                    let _ = sm_occt::Shape::load_brep(&m);
+                }
+            }
+        }
     }
 }

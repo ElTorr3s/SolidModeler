@@ -11,6 +11,7 @@
 #include "rust/cxx.h"
 
 #include <Standard_Failure.hxx>
+#include <Standard_Version.hxx>
 #include <TopoDS_Shape.hxx>
 
 #include <array>
@@ -26,8 +27,14 @@ template <typename Try, typename Fail>
 static void trycatch(Try &&func, Fail &&fail) noexcept try {
   func();
 } catch (const Standard_Failure &e) {
+#if OCC_VERSION_MAJOR >= 8
+  // 8.0 rebased Standard_Failure on std::exception, without RTTI handles.
+  const char *msg = e.what();
+  std::string text = std::string(e.ExceptionType()) +
+#else
   const char *msg = e.GetMessageString();
   std::string text = std::string(e.DynamicType()->Name()) +
+#endif
                      ((msg && *msg) ? std::string(": ") + msg : std::string());
   fail(text);
 } catch (const std::exception &e) {

@@ -5,13 +5,20 @@
 //! 1. [`sm_step::screen`] parses the file in Rust with hard limits and
 //!    rejects anything malformed.
 //! 2. The `sm-step-worker` executable reads it with OpenCascade inside the
-//!    sandbox from [`crate::sandbox`], with a wall-clock timeout, and sends
-//!    back each solid as OpenCascade binary B-rep in a small framed format.
-//! 3. This process checks the framing in Rust, then loads each B-rep and
-//!    accepts it only if it is a valid solid of sane size.
+//!    sandbox from [`crate::sandbox`], with a wall-clock timeout. It checks
+//!    each solid there (a valid solid of sane size, in a form the next step
+//!    accepts) and sends it back as OpenCascade binary B-rep in a small
+//!    framed format, or says why it was skipped.
+//! 3. This process checks the framing in Rust, then parses each B-rep in
+//!    Rust with [`crate::brep_screen`] before OpenCascade loads it, because
+//!    a worker compromised by a hostile file could send anything. Only
+//!    bytes that pass reach OpenCascade's reader. The worker's output is
+//!    capped in size, and screened bytes load in time linear in that size,
+//!    so this stage needs no timeout of its own.
 //!
 //! Export runs in-process: it only writes, from shapes we built.
 
+use super::brep_screen::{self, ShapeKind};
 use super::sandbox::WorkerLimits;
 use super::{OcctError, Result, Shape, ShapeType};
 use crate::ffi::ffi as sys;
@@ -27,7 +34,7 @@ use std::time::{Duration, Instant};
 static STEP_LOCK: Mutex<()> = Mutex::new(());
 
 const MAGIC: &[u8; 4] = b"SMSW";
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 /// No body name is longer than this; longer means a corrupt stream.
 const MAX_NAME: usize = 4096;
 /// Coordinates beyond this many millimetres (10 km) are not a part.
@@ -106,7 +113,7 @@ pub fn import_step(bytes: &[u8], opts: &ImportOptions) -> Result<StepImport> {
     let mut bodies = Vec::with_capacity(raw.len());
     let mut warnings = screened.warnings.clone();
     for (i, body) in raw.into_iter().enumerate() {
-        match accept(&body.brep) {
+        match body.brep.map_err(step_err).and_then(|b| accept(&b)) {
             Ok(shape) => bodies.push(ImportedBody {
                 name: body.name,
                 color: body.color,
@@ -128,25 +135,47 @@ pub fn import_step(bytes: &[u8], opts: &ImportOptions) -> Result<StepImport> {
     })
 }
 
-/// Loads one B-rep from the worker and checks it before anyone uses it.
+/// Loads one B-rep from the worker: Rust screens the bytes first, and
+/// OpenCascade reads only what passes.
 fn accept(brep: &[u8]) -> Result<Shape> {
+    let summary = brep_screen::screen(brep).map_err(step_err)?;
+    if summary.root != ShapeKind::Solid {
+        return Err(step_err("not a solid"));
+    }
+    // Screened just above.
     let shape = Shape::from_brep(brep)?;
     if shape.shape_type()? != ShapeType::Solid {
         return Err(step_err("not a solid"));
     }
-    if !shape.is_valid() {
-        return Err(step_err("OpenCascade reports the solid as invalid"));
+    Ok(shape)
+}
+
+/// Runs in the worker on each solid OpenCascade read: the checks the
+/// parent cannot afford to run on untrusted geometry.
+fn check_in_worker(brep: Vec<u8>) -> std::result::Result<Vec<u8>, String> {
+    let shape = Shape::from_brep(&brep).map_err(|e| e.to_string())?;
+    if shape.shape_type().map_err(|e| e.to_string())? != ShapeType::Solid {
+        return Err("not a solid".into());
     }
-    let b = shape.bounding_box()?;
+    if !shape.is_valid() {
+        return Err("OpenCascade reports the solid as invalid".into());
+    }
+    let b = shape.bounding_box().map_err(|e| e.to_string())?;
     if !b
         .min
         .iter()
         .chain(&b.max)
         .all(|v| v.is_finite() && v.abs() <= MAX_COORD)
     {
-        return Err(step_err("solid lies outside the 10 km modelling range"));
+        return Err("solid lies outside the 10 km modelling range".into());
     }
-    Ok(shape)
+    // A solid the parent's screen would refuse is reported here, with the
+    // reason, instead of failing there.
+    let summary = brep_screen::screen(&brep)?;
+    if summary.root != ShapeKind::Solid {
+        return Err("not a solid".into());
+    }
+    Ok(brep)
 }
 
 fn run_worker(bytes: &[u8], opts: &ImportOptions) -> Result<Vec<u8>> {
@@ -224,7 +253,8 @@ fn run_worker(bytes: &[u8], opts: &ImportOptions) -> Result<Vec<u8>> {
 pub(crate) struct RawBody {
     pub name: String,
     pub color: Option<[f64; 3]>,
-    pub brep: Vec<u8>,
+    /// The solid, or why the worker skipped it.
+    pub brep: std::result::Result<Vec<u8>, String>,
 }
 
 struct Cursor<'a> {
@@ -271,8 +301,9 @@ impl<'a> Cursor<'a> {
 }
 
 /// Worker output: `SMSW`, version, status (0 = bodies, 1 = error), then
-/// either a count and per body (name, colour flag, rgb, B-rep length and
-/// bytes), or an error message. Little-endian throughout.
+/// either a count and per body (name, colour flag, rgb, then 0 with the
+/// B-rep length and bytes or 1 with the reason it was skipped), or an error
+/// message. Little-endian throughout.
 pub(crate) fn encode(bodies: &[RawBody]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
@@ -280,25 +311,35 @@ pub(crate) fn encode(bodies: &[RawBody]) -> Vec<u8> {
     out.push(0);
     out.extend_from_slice(&(bodies.len() as u32).to_le_bytes());
     for b in bodies {
-        let name: &str = if b.name.len() > MAX_NAME {
-            let mut end = MAX_NAME;
-            while !b.name.is_char_boundary(end) {
-                end -= 1;
-            }
-            &b.name[..end]
-        } else {
-            &b.name
-        };
-        out.extend_from_slice(&(name.len() as u32).to_le_bytes());
-        out.extend_from_slice(name.as_bytes());
+        put_text(&mut out, &b.name);
         out.push(u8::from(b.color.is_some()));
         for c in b.color.unwrap_or_default() {
             out.extend_from_slice(&c.to_le_bytes());
         }
-        out.extend_from_slice(&(b.brep.len() as u64).to_le_bytes());
-        out.extend_from_slice(&b.brep);
+        match &b.brep {
+            Ok(brep) => {
+                out.push(0);
+                out.extend_from_slice(&(brep.len() as u64).to_le_bytes());
+                out.extend_from_slice(brep);
+            }
+            Err(reason) => {
+                out.push(1);
+                put_text(&mut out, reason);
+            }
+        }
     }
     out
+}
+
+/// A length-prefixed string of at most `MAX_NAME` bytes, cut at a
+/// character boundary.
+fn put_text(out: &mut Vec<u8>, text: &str) {
+    let mut end = text.len().min(MAX_NAME);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    out.extend_from_slice(&(end as u32).to_le_bytes());
+    out.extend_from_slice(&text.as_bytes()[..end]);
 }
 
 pub(crate) fn encode_error(message: &str) -> Vec<u8> {
@@ -306,9 +347,7 @@ pub(crate) fn encode_error(message: &str) -> Vec<u8> {
     out.extend_from_slice(MAGIC);
     out.push(VERSION);
     out.push(1);
-    let msg = &message.as_bytes()[..message.len().min(MAX_NAME)];
-    out.extend_from_slice(&(msg.len() as u32).to_le_bytes());
-    out.extend_from_slice(msg);
+    put_text(&mut out, message);
     out
 }
 
@@ -353,8 +392,14 @@ pub(crate) fn decode(buf: &[u8], max_bodies: u32) -> Result<Vec<RawBody>> {
         if has_color && !rgb.iter().all(|v| (0.0..=1.0).contains(v)) {
             return Err(step_err("worker output has a colour out of range"));
         }
-        let len = usize::try_from(c.u64()?).map_err(|_| step_err("B-rep too large"))?;
-        let brep = c.take(len)?.to_vec();
+        let brep = match c.u8()? {
+            0 => {
+                let len = usize::try_from(c.u64()?).map_err(|_| step_err("B-rep too large"))?;
+                Ok(c.take(len)?.to_vec())
+            }
+            1 => Err(c.string(MAX_NAME)?),
+            _ => return Err(step_err("worker output has a bad body kind")),
+        };
         bodies.push(RawBody {
             name,
             color: has_color.then_some(rgb),
@@ -376,7 +421,7 @@ pub(crate) fn read_in_worker(bytes: &[u8], max_bodies: u32) -> Result<Vec<RawBod
         .map(|b| RawBody {
             name: b.name,
             color: b.has_color.then_some([b.r, b.g, b.b]),
-            brep: b.brep,
+            brep: check_in_worker(b.brep),
         })
         .collect())
 }
@@ -444,7 +489,7 @@ mod tests {
         RawBody {
             name: name.into(),
             color,
-            brep: brep.to_vec(),
+            brep: Ok(brep.to_vec()),
         }
     }
 
@@ -453,14 +498,20 @@ mod tests {
         let bodies = vec![
             body("bracket", Some([1.0, 0.5, 0.0]), b"abc"),
             body("ø pin", None, b""),
+            RawBody {
+                name: "bad".into(),
+                color: None,
+                brep: Err("not a solid".into()),
+            },
         ];
         let out = decode(&encode(&bodies), 10).unwrap();
-        assert_eq!(out.len(), 2);
+        assert_eq!(out.len(), 3);
         assert_eq!(out[0].name, "bracket");
         assert_eq!(out[0].color, Some([1.0, 0.5, 0.0]));
-        assert_eq!(out[0].brep, b"abc");
+        assert_eq!(out[0].brep.as_deref(), Ok(&b"abc"[..]));
         assert_eq!(out[1].name, "ø pin");
         assert_eq!(out[1].color, None);
+        assert_eq!(out[2].brep, Err("not a solid".to_string()));
         let err = decode(&encode_error("boom"), 10).err().unwrap();
         assert_eq!(err, OcctError::Step("boom".into()));
         // Long names are cut at a character boundary.
@@ -499,8 +550,12 @@ mod tests {
         let mut bad = good.clone();
         bad[flag + 1..flag + 9].copy_from_slice(&2.0f64.to_le_bytes());
         assert!(decode(&bad, 10).is_err());
+        let kind_at = flag + 1 + 24;
         let mut bad = good.clone();
-        let len_at = flag + 1 + 24;
+        bad[kind_at] = 2;
+        assert!(decode(&bad, 10).is_err());
+        let mut bad = good.clone();
+        let len_at = kind_at + 1;
         bad[len_at..len_at + 8].copy_from_slice(&u64::MAX.to_le_bytes());
         assert!(decode(&bad, 10).is_err());
         // A huge name length.

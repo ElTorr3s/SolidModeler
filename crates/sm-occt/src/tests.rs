@@ -436,10 +436,170 @@ fn brep_round_trip_preserves_shape() {
         b.mass_props().unwrap().volume,
         1e-12
     ));
-    // Truncated or flipped bytes never crash the reader.
-    for cut in (0..bytes.len()).step_by(bytes.len() / 25 + 1) {
-        let _ = Shape::from_brep(&bytes[..cut]);
+    assert!(Shape::load_brep(&bytes).is_ok());
+    // Truncated bytes are stopped before OpenCascade reads them.
+    for cut in 0..bytes.len() {
+        assert!(Shape::load_brep(&bytes[..cut]).is_err(), "{cut}");
     }
+}
+
+/// Shapes from every kind of operation, as B-rep bytes.
+fn sample_breps() -> Vec<(&'static str, Vec<u8>)> {
+    let b = make_box(20.0, 20.0, 10.0).unwrap();
+    let top_edges: Vec<SubShape> = b
+        .edges()
+        .into_iter()
+        .filter(|e| {
+            let [p, q] = b.edge_ends(*e).unwrap();
+            close(p[2], 10.0, 1e-9) && close(q[2], 10.0, 1e-9)
+        })
+        .collect();
+    let profile = polygon_face(&[square(5.0, 0.0, 2.0, 0.0)]).unwrap().face;
+    let shapes = [
+        ("box", b.clone()),
+        ("cylinder", make_cylinder(3.0, 8.0).unwrap()),
+        (
+            "cut",
+            boolean(BooleanKind::Cut, &b, &make_cylinder(3.0, 20.0).unwrap())
+                .unwrap()
+                .shape,
+        ),
+        ("fillet", fillet(&b, &top_edges, 2.0).unwrap().shape),
+        ("chamfer", chamfer(&b, &top_edges, 1.0).unwrap().shape),
+        ("shell", shell(&b, &[top_face(&b)], 1.0).unwrap().shape),
+        ("prism", prism(&profile, [0.0, 0.0, 4.0]).unwrap().op.shape),
+        (
+            "revolve",
+            revolve(&profile, [0.0; 3], [0.0, 1.0, 0.0], TAU)
+                .unwrap()
+                .op
+                .shape,
+        ),
+        (
+            "partial revolve",
+            revolve(&profile, [0.0; 3], [0.0, 1.0, 0.0], PI / 3.0)
+                .unwrap()
+                .op
+                .shape,
+        ),
+    ];
+    shapes
+        .into_iter()
+        .map(|(n, s)| (n, s.to_brep().unwrap()))
+        .collect()
+}
+
+#[test]
+fn kernel_outputs_pass_the_brep_screen() {
+    for (name, bytes) in sample_breps() {
+        let s = brep_screen::screen(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+        // Booleans return a compound holding the solid.
+        assert!(
+            matches!(
+                s.root,
+                brep_screen::ShapeKind::Solid | brep_screen::ShapeKind::Compound
+            ),
+            "{name}"
+        );
+        let shape = Shape::load_brep(&bytes).unwrap();
+        // One face record can be placed twice (a prism's caps share one).
+        let faces = shape.count(SubKind::Face) as usize;
+        assert!(
+            s.faces > 0 && s.faces <= faces,
+            "{name}: {} vs {faces}",
+            s.faces
+        );
+    }
+}
+
+#[test]
+fn hand_built_streams_read_as_the_screen_expects() {
+    // The screen's model of the format matches OpenCascade's reader: what
+    // it accepts, OpenCascade reads into the expected shape.
+    use brep_screen::build::*;
+    let cubic = || bspline(3, 4, &[(0.0, 4), (1.0, 4)]);
+    let cases = [
+        (vertex(), ShapeType::Vertex, 0),
+        (edge_on(line([0.0; 3], X), 0.0, 1.0), ShapeType::Compound, 0),
+        (
+            edge_on(trimmed(0.25, 0.75, cubic()), 0.25, 0.75),
+            ShapeType::Compound,
+            0,
+        ),
+        (
+            edge_on(trimmed(0.0, 1.0, offset(1.0, circle(2.0))), 0.0, 1.0),
+            ShapeType::Compound,
+            0,
+        ),
+        (
+            face_on(rect_trimmed([0.0, 1.0, -1.0, 1.0], sphere(2.0))),
+            ShapeType::Compound,
+            1,
+        ),
+        (face_on(cone(0.3)), ShapeType::Compound, 1),
+    ];
+    for (b, kind, faces) in cases {
+        let bytes = b.bytes();
+        brep_screen::screen(&bytes).unwrap();
+        let shape = Shape::load_brep(&bytes).unwrap();
+        assert_eq!(shape.shape_type().unwrap(), kind);
+        assert_eq!(shape.count(SubKind::Face), faces as u32);
+        // OpenCascade writes it back in the same layout (computed axes may
+        // differ in the sign of a zero), and that passes the screen too.
+        let written = shape.to_brep().unwrap();
+        assert_eq!(written.len(), bytes.len());
+        brep_screen::screen(&written).unwrap();
+    }
+    // Locations: a translated vertex reads back at the moved position.
+    let mut b = vertex();
+    b.locations = vec![transform(1.0, [10.0, 0.0, 0.0])];
+    b.root = (0, 1, 1);
+    let v = Shape::load_brep(&b.bytes()).unwrap();
+    let bb = v.bounding_box().unwrap();
+    assert!(close(bb.min[0], 11.0, 1e-6), "{:?}", bb.min);
+}
+
+#[test]
+fn mutated_breps_never_reach_opencascade_unchecked() {
+    // Random damage to real B-reps: the screen either rejects the bytes
+    // or OpenCascade reads them; nothing crashes.
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut accepted = 0;
+    for (_, bytes) in sample_breps() {
+        for _ in 0..1500 {
+            let mut m = bytes.clone();
+            match next() % 4 {
+                0 => {
+                    let i = next() as usize % m.len();
+                    m[i] = next() as u8;
+                }
+                1 => {
+                    let i = next() as usize % (m.len() - 4);
+                    m[i..i + 4].copy_from_slice(&(next() as i32 % 64).to_le_bytes());
+                }
+                2 => {
+                    let i = next() as usize % (m.len() - 8);
+                    let v = f64::from_le_bytes(m[i..i + 8].try_into().unwrap());
+                    m[i..i + 8].copy_from_slice(&(v * 1.5 + 1.0).to_le_bytes());
+                }
+                _ => {
+                    let i = next() as usize % m.len();
+                    m.remove(i);
+                }
+            }
+            if Shape::load_brep(&m).is_ok() {
+                accepted += 1;
+            }
+        }
+    }
+    // Most damage is caught; some (a changed coordinate) is still valid.
+    assert!(accepted > 0);
 }
 
 #[test]
@@ -449,4 +609,16 @@ fn shapes_move_between_threads() {
         .join()
         .unwrap();
     assert!(close(v, 6.0, 1e-12));
+}
+
+/// Writes the sample B-reps as fuzzing seeds:
+/// `SM_FUZZ_SEEDS=crates/sm-occt/fuzz/seeds cargo test -p sm-occt write_fuzz_seeds -- --ignored`
+#[test]
+#[ignore]
+fn write_fuzz_seeds() {
+    let dir = std::path::PathBuf::from(std::env::var("SM_FUZZ_SEEDS").expect("SM_FUZZ_SEEDS"));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, bytes) in sample_breps() {
+        std::fs::write(dir.join(name.replace(' ', "_")), bytes).unwrap();
+    }
 }
