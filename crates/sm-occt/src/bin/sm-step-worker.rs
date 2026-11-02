@@ -87,6 +87,38 @@ fn self_test() -> Result<Vec<u8>, String> {
         std::net::TcpStream::connect("127.0.0.1:9").is_ok()
             || std::net::UdpSocket::bind("127.0.0.1:0").is_ok(),
     );
+    // SAFETY: these calls only query ids or probe with signal 0 (no
+    // signal is delivered); openat2 gets a valid path and open_how.
+    let (me, parent) = unsafe { (libc::getpid(), libc::getppid()) };
+    check("signal_self", unsafe { libc::kill(me, 0) } == 0);
+    check("signal_thread_self", unsafe {
+        libc::syscall(libc::SYS_tgkill, me, libc::gettid(), 0) == 0
+    });
+    check("signal_parent", unsafe { libc::kill(parent, 0) } == 0);
+    check("signal_init", unsafe { libc::kill(1, 0) } == 0);
+    check("signal_everyone", unsafe { libc::kill(-1, 0) } == 0);
+    check("signal_by_tid", unsafe {
+        libc::syscall(libc::SYS_tkill, parent, 0) == 0
+    });
+    check(
+        "pidfd",
+        unsafe { libc::syscall(libc::SYS_pidfd_open, parent, 0) } >= 0,
+    );
+    check("openat2", {
+        // struct open_how { u64 flags, mode, resolve; }
+        let how: [u64; 3] = [libc::O_RDONLY as u64, 0, 0];
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_openat2,
+                libc::AT_FDCWD,
+                c"/".as_ptr(),
+                how.as_ptr(),
+                std::mem::size_of_val(&how),
+            )
+        };
+        // Allowed would be a descriptor; anything else must be ENOSYS.
+        r >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOSYS)
+    });
     check("thread", std::thread::spawn(|| 1).join().is_ok());
     check("allocate", {
         let v = vec![1u8; 64 << 20];

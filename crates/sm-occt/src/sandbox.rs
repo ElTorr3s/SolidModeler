@@ -9,7 +9,8 @@
 //! * Landlock removes all filesystem access (no reads, no writes).
 //! * Seccomp denies exec, fork, sockets, ptrace, mounts, namespaces, module
 //!   loading and every syscall that writes to the filesystem, as a second
-//!   line behind Landlock.
+//!   line behind Landlock. Signals may only go to the worker itself, which
+//!   also covers kernels whose Landlock cannot scope signals (before ABI 6).
 //!
 //! What is left is enough to read stdin, compute, allocate, start threads
 //! and write the result to stdout.
@@ -116,7 +117,7 @@ mod linux {
         SeccompRule::new(vec![cond]).map_err(|e| e.to_string())
     }
 
-    fn apply(rules: BTreeMap<i64, Vec<SeccompRule>>, errno: i32) -> Result<(), String> {
+    fn compile(rules: BTreeMap<i64, Vec<SeccompRule>>, errno: i32) -> Result<BpfProgram, String> {
         let filter = SeccompFilter::new(
             rules,
             SeccompAction::Allow,
@@ -124,11 +125,20 @@ mod linux {
             ARCH,
         )
         .map_err(|e| format!("seccomp: {e}"))?;
-        let program: BpfProgram = filter.try_into().map_err(|e| format!("seccomp: {e:?}"))?;
-        seccompiler::apply_filter(&program).map_err(|e| format!("seccomp: {e}"))
+        filter.try_into().map_err(|e| format!("seccomp: {e:?}"))
     }
 
     fn seccomp() -> Result<(), String> {
+        // SAFETY: getpid has no preconditions.
+        let me = unsafe { libc::getpid() } as u64;
+        for program in programs(me)? {
+            seccompiler::apply_filter(&program).map_err(|e| format!("seccomp: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// The two filters, for a worker whose pid is `me`.
+    pub(super) fn programs(me: u64) -> Result<[BpfProgram; 2], String> {
         let mut deny: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
         let always = [
             libc::SYS_execve,
@@ -179,6 +189,13 @@ mod linux {
             libc::SYS_setresgid,
             libc::SYS_setgroups,
             libc::SYS_io_uring_setup,
+            // Signals by thread id alone, or through a pidfd, could reach
+            // another process; the worker's own signals use tgkill.
+            libc::SYS_tkill,
+            libc::SYS_pidfd_open,
+            libc::SYS_pidfd_send_signal,
+            libc::SYS_pidfd_getfd,
+            libc::SYS_process_madvise,
         ];
         for nr in always {
             deny.insert(nr, Vec::new());
@@ -220,12 +237,85 @@ mod linux {
             libc::SYS_clone,
             vec![SeccompRule::new(vec![not_thread]).map_err(|e| e.to_string())?],
         );
-        apply(deny, libc::EPERM)?;
+        // Signals to any process but this one. The worker cannot fork after
+        // this point, so its pid is fixed; the pid arguments are 32-bit, and
+        // 0 or negative values (process groups, everyone) never match it.
+        let not_me = SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Ne, me)
+            .map_err(|e| e.to_string())?;
+        for nr in [
+            libc::SYS_kill,
+            libc::SYS_tgkill,
+            libc::SYS_rt_sigqueueinfo,
+            libc::SYS_rt_tgsigqueueinfo,
+        ] {
+            deny.insert(
+                nr,
+                vec![SeccompRule::new(vec![not_me.clone()]).map_err(|e| e.to_string())?],
+            );
+        }
+        let denied = compile(deny, libc::EPERM)?;
 
-        // clone3 passes its flags in memory, out of seccomp's reach. Make it
-        // look unimplemented so libc falls back to clone, which is checked.
+        // clone3 and openat2 pass their flags in memory, out of seccomp's
+        // reach. Make them look unimplemented so libc falls back to clone
+        // and openat, which are checked.
         let mut enosys = BTreeMap::new();
         enosys.insert(libc::SYS_clone3, Vec::new());
-        apply(enosys, libc::ENOSYS)
+        enosys.insert(libc::SYS_openat2, Vec::new());
+        Ok([denied, compile(enosys, libc::ENOSYS)?])
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    /// The signal rule on its own, without Landlock (which also scopes
+    /// signals on new kernels): a child process installs the filter built
+    /// for its parent's pid, so signalling the parent is "self" and allowed,
+    /// while signalling itself or init is another process and denied.
+    #[test]
+    fn seccomp_lets_signals_reach_only_the_named_process() {
+        // SAFETY: getpid has no preconditions.
+        let parent = unsafe { libc::getpid() };
+        // Built before fork: the child only makes raw syscalls.
+        let programs = super::linux::programs(parent as u64).unwrap();
+        // SAFETY: the child calls only async-signal-safe functions (prctl,
+        // seccomp through apply_filter, kill, getpid, _exit) and never
+        // returns into the test harness.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            let code = unsafe {
+                let mut code = 0;
+                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                    libc::_exit(100);
+                }
+                for p in &programs {
+                    if seccompiler::apply_filter(p).is_err() {
+                        libc::_exit(101);
+                    }
+                }
+                if libc::kill(parent, 0) != 0 {
+                    code |= 1;
+                }
+                if libc::kill(libc::getpid(), 0) == 0 {
+                    code |= 2;
+                }
+                if libc::kill(1, 0) == 0 {
+                    code |= 4;
+                }
+                if libc::kill(-1, 0) == 0 {
+                    code |= 8;
+                }
+                if libc::syscall(libc::SYS_tkill, parent, 0) == 0 {
+                    code |= 16;
+                }
+                code
+            };
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        // SAFETY: waiting on our own child.
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status), "child status {status}");
+        assert_eq!(libc::WEXITSTATUS(status), 0, "failed checks (bit mask)");
     }
 }

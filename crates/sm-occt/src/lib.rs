@@ -16,6 +16,7 @@
 //! see [`step::import_step`], which screens the file in Rust and then reads
 //! it in a sandboxed worker process.
 
+pub mod brep_screen;
 mod ffi;
 mod history;
 pub mod sandbox;
@@ -304,17 +305,26 @@ impl Shape {
         })
     }
 
-    /// Serialises to OpenCascade's binary B-rep format, for caches and the
+    /// Serialises to OpenCascade's binary B-rep format (version 3, without
+    /// triangulation: the form [`brep_screen`] accepts), for caches and the
     /// STEP worker.
     pub fn to_brep(&self) -> Result<Vec<u8>> {
         sys::to_brep(self.inner()).map_err(kernel)
     }
 
     /// Reads OpenCascade's binary B-rep format. Only for bytes this program
-    /// wrote (caches) or that came from the STEP worker and passed its
-    /// checks; never for files from outside.
+    /// wrote (caches) or that came from the STEP worker and passed
+    /// [`brep_screen::screen`]; never for files from outside.
     pub(crate) fn from_brep(bytes: &[u8]) -> Result<Shape> {
         Shape::wrap(sys::from_brep(bytes).map_err(kernel)?)
+    }
+
+    /// Reads OpenCascade's binary B-rep format from any source: the bytes
+    /// are parsed in Rust first ([`brep_screen::screen`]) and OpenCascade
+    /// only reads them if they pass.
+    pub fn load_brep(bytes: &[u8]) -> Result<Shape> {
+        brep_screen::screen(bytes).map_err(OcctError::Input)?;
+        Shape::from_brep(bytes)
     }
 }
 

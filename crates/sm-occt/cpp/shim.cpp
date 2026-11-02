@@ -661,7 +661,7 @@ MeshData tessellate(const Shape &s, double linear, double angular) {
 rust::Vec<uint8_t> to_brep(const Shape &s) {
   require_shape(s.shape, "to_brep");
   std::ostringstream out(std::ios::binary);
-  BinTools::Write(s.shape, out, Standard_False, Standard_False, BinTools_FormatVersion_CURRENT);
+  BinTools::Write(s.shape, out, Standard_False, Standard_False, BinTools_FormatVersion_VERSION_3);
   require(out.good(), "could not serialise shape");
   const std::string bytes = out.str();
   rust::Vec<uint8_t> v;
