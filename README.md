@@ -21,6 +21,8 @@ exported to STEP. There is no GUI yet.
 | `crates/sm-document` | Part document: parameters and ordered feature history, rollback marker |
 | `crates/sm-kernel` | Replays the history into B-rep solids using [`truck`](https://github.com/ricosjp/truck) |
 | `crates/sm-history` | Versions, branches, tags and feature-level merges ([design](docs/versioning.md)) |
+| `crates/sm-naming` | Persistent face/edge/vertex names that survive rebuilds ([design](docs/topological-naming.md)) |
+| `crates/sm-naming-types` | The name types alone, with no kernel dependency, for crates that store references |
 | `crates/sm-format` | Reads and writes `.smp` files ([spec](docs/smp-format.md)) |
 | `crates/sm-step` | STEP export (geometry only) |
 | `crates/sm-sketch` | 2D sketch geometry and constraint solver (degrees of freedom, over-constraint detection) |

@@ -984,6 +984,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sm-expr"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "sm-format"
 version = "0.1.0"
 dependencies = [
@@ -1008,6 +1015,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sm-ids"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "sm-kernel"
 version = "0.1.0"
 dependencies = [
@@ -1017,6 +1033,27 @@ dependencies = [
  "truck-modeling",
  "truck-shapeops",
  "truck-topology",
+]
+
+[[package]]
+name = "sm-naming"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sm-document",
+ "sm-kernel",
+ "sm-naming-types",
+ "truck-modeling",
+]
+
+[[package]]
+name = "sm-naming-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sm-document",
 ]
 
 [[package]]
