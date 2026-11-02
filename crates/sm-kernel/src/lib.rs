@@ -8,8 +8,8 @@ pub mod curves;
 mod extrude;
 pub mod profile;
 
-use extrude::Frame;
-use profile::ProfileError;
+pub use extrude::Frame;
+use profile::{ProfileError, Region};
 use sm_document::{
     BodyOperation, ExtrudeExtent, FeatureId, FeatureKind, LengthUnit, OriginPlane, PartDocument,
     Sketch,
@@ -63,10 +63,11 @@ pub const MAX_FACES: usize = 200_000;
 /// tool makes a side face per point, and classifying it meshes them all.
 const REGION_POINT_COST: u64 = 10;
 /// Total geometry work per rebuild. Meshing costs one unit per face; a truck
-/// boolean costs the square of the faces involved, because its run time grows
-/// that fast or faster. This allows roughly 30 s of booleans (about a
-/// 100-pocket plate with truck).
-pub const MAX_WORK: u64 = 6_000_000;
+/// boolean costs the product of the two solids' face counts, since it
+/// intersects every pair. Calibrated on a release build at roughly 55k units
+/// a second, so the cap is about 35 s; a plate with a 12 x 12 grid of holes
+/// uses about 300k (5 s), and 100 flush pockets about 190k (2 s).
+pub const MAX_WORK: u64 = 2_000_000;
 
 /// Tracks the work a rebuild has done, so a small hostile file can't run for
 /// hours, and lets a caller (the UI) cancel a rebuild from another thread.
@@ -84,6 +85,11 @@ impl Default for Budget {
 }
 
 impl Budget {
+    /// Work spent so far.
+    pub fn used(&self) -> u64 {
+        self.used.get()
+    }
+
     /// A budget of `limit` work units instead of [`MAX_WORK`].
     pub fn with_limit(limit: u64) -> Self {
         Self {
@@ -165,6 +171,37 @@ pub struct Body {
     pub solid: Solid,
 }
 
+/// Hooks for code that follows a rebuild step by step, such as topological
+/// naming. Every method does nothing by default.
+pub trait RebuildObserver {
+    /// `feature` built a tool solid for one sketch region, before it is
+    /// combined with the part.
+    fn tool_built(&mut self, _feature: FeatureId, _tool: &ExtrudeTool<'_>) {}
+    /// `feature` has combined all its tools with the part; `bodies` is the
+    /// part as it now stands. Bodies the feature didn't touch are the same
+    /// solids as before (their faces keep their truck ids).
+    fn bodies_changed(&mut self, _feature: FeatureId, _bodies: &[Body]) {}
+}
+
+impl RebuildObserver for () {}
+
+/// One extruded sketch region, as passed to [`RebuildObserver::tool_built`].
+#[derive(Debug, Clone, Copy)]
+pub struct ExtrudeTool<'a> {
+    /// Index into the regions of the sketch, in [`profile::regions`] order.
+    pub region_index: usize,
+    pub region: &'a Region,
+    pub frame: &'a Frame,
+    /// Start height and positive length along `frame.normal`, before any
+    /// flush-face adjustment.
+    pub start: f64,
+    pub length: f64,
+    /// The part's tolerances, for matching tool geometry to the sketch.
+    pub tol: Tolerance,
+    /// The tool as built, including flush-face adjustments.
+    pub solid: &'a Solid,
+}
+
 /// Replays the active features of `doc` in order.
 pub fn rebuild(doc: &PartDocument) -> Result<Model, RebuildError> {
     rebuild_with(doc, &Budget::default())
@@ -173,6 +210,23 @@ pub fn rebuild(doc: &PartDocument) -> Result<Model, RebuildError> {
 /// [`rebuild`] with a caller-supplied budget, for example one that can be
 /// cancelled from the UI thread.
 pub fn rebuild_with(doc: &PartDocument, budget: &Budget) -> Result<Model, RebuildError> {
+    rebuild_observed_with(doc, budget, &mut ())
+}
+
+/// [`rebuild`], reporting each tool and each feature's result to `observer`.
+pub fn rebuild_observed(
+    doc: &PartDocument,
+    observer: &mut impl RebuildObserver,
+) -> Result<Model, RebuildError> {
+    rebuild_observed_with(doc, &Budget::default(), observer)
+}
+
+/// [`rebuild_observed`] with a caller-supplied budget.
+pub fn rebuild_observed_with(
+    doc: &PartDocument,
+    budget: &Budget,
+    observer: &mut impl RebuildObserver,
+) -> Result<Model, RebuildError> {
     doc.validate()?;
     let tol = Tolerance::for_units(doc.units);
     let mut sketches: HashMap<FeatureId, &Sketch> = HashMap::new();
@@ -230,7 +284,7 @@ pub fn rebuild_with(doc: &PartDocument, budget: &Budget) -> Result<Model, Rebuil
                 let slab_ok =
                     |slab: &Solid| boolean::slab_ok(cx, &model.bodies, slab, extrude.operation);
                 let mut solids = Vec::with_capacity(regions.len());
-                for region in regions.iter() {
+                for (region_index, region) in regions.iter().enumerate() {
                     let points: usize =
                         region.outer.len() + region.holes.iter().map(Vec::len).sum::<usize>();
                     budget.spend(id, (points as u64 + 2) * REGION_POINT_COST)?;
@@ -245,6 +299,18 @@ pub fn rebuild_with(doc: &PartDocument, budget: &Budget) -> Result<Model, Rebuil
                         &slab_ok,
                     )?
                     .ok_or(RebuildError::InvalidFace(id))?;
+                    observer.tool_built(
+                        id,
+                        &ExtrudeTool {
+                            region_index,
+                            region,
+                            frame: &frame,
+                            start,
+                            length,
+                            tol,
+                            solid: &solid,
+                        },
+                    );
                     solids.push(solid);
                 }
                 match extrude.operation {
@@ -261,6 +327,7 @@ pub fn rebuild_with(doc: &PartDocument, budget: &Budget) -> Result<Model, Rebuil
                     BodyOperation::Cut => boolean::cut(cx, &mut model, &solids)?,
                     BodyOperation::Intersect => boolean::intersect(cx, &mut model, &solids)?,
                 }
+                observer.bodies_changed(id, &model.bodies);
             }
         }
     }
@@ -911,6 +978,39 @@ mod tests {
         assert_eq!(volume(&model), 8000.0 - 800.0 - 5.0 * 8.0 * 2.0);
     }
 
+    /// A 120 mm plate with a k x k grid of square cutouts from one sketch at
+    /// `z`, cut `depth` along +Z.
+    fn plate(k: usize, z: f64, depth: f64) -> PartDocument {
+        let mut doc = PartDocument::new("P", LengthUnit::Mm);
+        add_extrude(
+            &mut doc,
+            vec![rect([0.0, 0.0, 120.0, 120.0])],
+            0.0,
+            10.0,
+            BodyOperation::Join,
+        );
+        let step = 120.0 / k as f64;
+        let holes = (0..k * k)
+            .map(|i| {
+                let x = (i % k) as f64 * step + step / 4.0;
+                let y = (i / k) as f64 * step + step / 4.0;
+                rect([x, y, x + step / 2.0, y + step / 2.0])
+            })
+            .collect();
+        add_extrude(&mut doc, holes, z, depth, BodyOperation::Cut);
+        doc
+    }
+
+    #[test]
+    fn ordinary_parts_fit_the_default_budget() {
+        let side = |k: usize| 120.0 / k as f64 / 2.0;
+        let holes = rebuild_ok(&plate(12, -1.0, 12.0));
+        assert_eq!(holes.bodies.len(), 1);
+        assert_eq!(volume(&holes), 144_000.0 - 144.0 * side(12).powi(2) * 10.0);
+        let pockets = rebuild_ok(&plate(10, 10.0, -5.0));
+        assert_eq!(volume(&pockets), 144_000.0 - 100.0 * side(10).powi(2) * 5.0);
+    }
+
     #[test]
     fn work_budget_and_cancel() {
         use std::sync::atomic::AtomicBool;
@@ -930,7 +1030,7 @@ mod tests {
             .collect();
         add_extrude(&mut doc, holes, -1.0, 12.0, BodyOperation::Cut);
         assert!(matches!(
-            rebuild_with(&doc, &Budget::with_limit(20_000)),
+            rebuild_with(&doc, &Budget::with_limit(2_000)),
             Err(RebuildError::TooMuchWork(_))
         ));
         // The default budget is enough for the same part.
@@ -1037,5 +1137,83 @@ mod tests {
             rebuild(&doc),
             Err(RebuildError::TooManyBodies(_) | RebuildError::TooManyTools(_))
         ));
+    }
+
+    #[derive(Default)]
+    struct Recorder {
+        events: Vec<String>,
+        last_bodies: Vec<usize>,
+    }
+
+    impl RebuildObserver for Recorder {
+        fn tool_built(&mut self, feature: FeatureId, tool: &ExtrudeTool<'_>) {
+            assert!(tool.length > 0.0);
+            let faces = tool.solid.boundaries()[0].len();
+            self.events.push(format!(
+                "tool {} r{} f{faces}",
+                feature.0, tool.region_index
+            ));
+        }
+        fn bodies_changed(&mut self, feature: FeatureId, bodies: &[Body]) {
+            self.events
+                .push(format!("bodies {} n{}", feature.0, bodies.len()));
+            self.last_bodies = bodies
+                .iter()
+                .map(|b| b.solid.boundaries().iter().map(|s| s.len()).sum())
+                .collect();
+        }
+    }
+
+    #[test]
+    fn observer_sees_every_tool_and_feature_result() {
+        let mut doc = base_block();
+        add_extrude(
+            &mut doc,
+            vec![rect([10.0, 5.0, 15.0, 15.0]), rect([25.0, 5.0, 30.0, 15.0])],
+            5.0,
+            10.0,
+            BodyOperation::Cut,
+        );
+        add_block(
+            &mut doc,
+            [100.0, 0.0, 110.0, 10.0],
+            0.0,
+            10.0,
+            BodyOperation::NewBody,
+        );
+        let mut rec = Recorder::default();
+        let model = rebuild_observed(&doc, &mut rec).unwrap();
+        assert_eq!(
+            rec.events,
+            [
+                "tool 2 r0 f6",
+                "bodies 2 n1",
+                "tool 4 r0 f6",
+                "tool 4 r1 f6",
+                "bodies 4 n1",
+                "tool 6 r0 f6",
+                "bodies 6 n2",
+            ]
+        );
+        // The last report is the model as returned.
+        let faces: Vec<usize> = model
+            .bodies
+            .iter()
+            .map(|b| b.solid.boundaries().iter().map(|s| s.len()).sum())
+            .collect();
+        assert_eq!(rec.last_bodies, faces);
+        // The unobserved rebuild gives the same model.
+        let plain = rebuild(&doc).unwrap();
+        assert_eq!(plain.bodies.len(), model.bodies.len());
+        assert_eq!(volume(&plain), volume(&model));
+    }
+
+    #[test]
+    fn observer_sees_nothing_after_a_failed_feature() {
+        let mut doc = base_block();
+        add_block(&mut doc, [0.0, 0.0, 1.0, 1.0], 0.0, 0.0, BodyOperation::Cut);
+        let mut rec = Recorder::default();
+        assert!(rebuild_observed(&doc, &mut rec).is_err());
+        assert_eq!(rec.events, ["tool 2 r0 f6", "bodies 2 n1"]);
     }
 }

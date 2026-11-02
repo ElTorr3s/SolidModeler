@@ -8,5 +8,7 @@ license.workspace = true
 [dependencies]
 sm-document.workspace = true
 sm-format.workspace = true
+sm-history.workspace = true
+serde_json.workspace = true
 sm-kernel.workspace = true
 sm-step.workspace = true
