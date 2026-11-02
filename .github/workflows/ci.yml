@@ -54,6 +54,8 @@ jobs:
           workspaces: |
             .
             fuzz
+      - name: Install OpenCASCADE
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends $OCCT_APT
       # --all-targets covers tests, benches and examples too.
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
@@ -98,6 +100,8 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install OpenCASCADE
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends $OCCT_APT
       - run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
@@ -114,6 +118,8 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install OpenCASCADE
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends $OCCT_APT
       - run: cargo check --workspace --all-targets --locked
 
   supply-chain:

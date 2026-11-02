@@ -12,6 +12,7 @@ sm-document.workspace = true
 sm-kernel.workspace = true
 truck-modeling.workspace = true
 truck-stepio.workspace = true
+thiserror.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
