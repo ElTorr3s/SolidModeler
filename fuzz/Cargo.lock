@@ -1083,6 +1083,7 @@ dependencies = [
  "chrono",
  "sm-document",
  "sm-kernel",
+ "thiserror 2.0.21",
  "truck-modeling",
  "truck-stepio",
 ]

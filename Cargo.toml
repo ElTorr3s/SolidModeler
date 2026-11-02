@@ -3,6 +3,24 @@ resolver = "2"
 members = ["crates/*", "apps/*"]
 # Fuzz targets need nightly and libFuzzer; build them with `cargo fuzz`.
 exclude = ["fuzz"]
+# sm-occt needs the system OpenCascade; build it with `-p sm-occt` or
+# `--workspace` once OpenCascade is installed.
+default-members = [
+    "crates/sm-document",
+    "crates/sm-expr",
+    "crates/sm-format",
+    "crates/sm-history",
+    "crates/sm-ids",
+    "crates/sm-kernel",
+    "crates/sm-mesh",
+    "crates/sm-naming",
+    "crates/sm-naming-types",
+    "crates/sm-sketch",
+    "crates/sm-step",
+    "crates/sm-testkit",
+    "apps/smcli",
+    "apps/solidmodeller",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -26,6 +44,7 @@ sm-naming = { path = "crates/sm-naming" }
 sm-naming-types = { path = "crates/sm-naming-types" }
 sm-step = { path = "crates/sm-step" }
 sm-testkit = { path = "crates/sm-testkit" }
+sm-occt = { path = "crates/sm-occt" }
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip: the default parser can be off by one ulp, which would
 # silently move geometry on every save and reopen.
