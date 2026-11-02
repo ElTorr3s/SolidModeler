@@ -4,37 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-const LIBS: &[&str] = &[
-    "TKernel",
-    "TKMath",
-    "TKG2d",
-    "TKG3d",
-    "TKGeomBase",
-    "TKGeomAlgo",
-    "TKBRep",
-    "TKTopAlgo",
-    "TKPrim",
-    "TKBO",
-    "TKBool",
-    "TKFillet",
-    "TKOffset",
-    "TKFeat",
-    "TKShHealing",
-    "TKMesh",
-    "TKXSBase",
-    "TKSTEP",
-    "TKSTEPBase",
-    "TKSTEP209",
-    "TKSTEPAttr",
-    "TKXDESTEP",
-    "TKXCAF",
-    "TKLCAF",
-    "TKCAF",
-    "TKCDF",
-    "TKVCAF",
-    "TKService",
-    "TKV3d",
-];
+include!("occt_libs.rs");
 
 fn include_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("OCCT_INCLUDE_DIR") {
@@ -79,7 +49,19 @@ fn main() {
             Path::new(&dir).display()
         );
     }
-    for lib in LIBS {
+    let header = include.join("Standard_Version.hxx");
+    println!("cargo:rerun-if-changed={}", header.display());
+    let text = std::fs::read_to_string(&header)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", header.display()));
+    let version = occt_version(&text)
+        .unwrap_or_else(|| panic!("no OCC_VERSION_MAJOR/MINOR in {}", header.display()));
+    if version < (7, 6) {
+        panic!(
+            "OpenCascade {}.{} is too old; sm-occt needs 7.6 or newer",
+            version.0, version.1
+        );
+    }
+    for lib in LIBS.iter().chain(step_libs(version)) {
         println!("cargo:rustc-link-lib=dylib={lib}");
     }
 }
