@@ -1,0 +1,10 @@
+target
+artifacts
+coverage
+# Corpora grow while fuzzing; only the seeds from make_corpus are committed.
+corpus/*/*
+!corpus/*/plate1
+!corpus/*/plate4
+!corpus/*/large3
+!corpus/rebuild/seed*
+run

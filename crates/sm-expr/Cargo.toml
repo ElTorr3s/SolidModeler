@@ -1,0 +1,11 @@
+[package]
+name = "sm-expr"
+description = "Parameter expressions with units: parsing, dimensional analysis and evaluation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true

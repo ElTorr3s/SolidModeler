@@ -1,0 +1,12 @@
+[package]
+name = "sm-mesh"
+description = "Kernel-agnostic display mesh with persistent face/edge names, and its binary cache encoding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+blake3 = { version = "1", default-features = false, features = ["std"] }
