@@ -4,6 +4,7 @@
 //! always derived from it by replaying the features (see `sm-kernel`).
 
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 /// Stable identifier for a feature. Later features refer to earlier ones by id,
 /// so ids survive renames and reordering.
@@ -23,10 +24,13 @@ pub struct PartDocument {
     /// Features in history order.
     #[serde(default)]
     pub features: Vec<Feature>,
-    /// Index into `features` of the end-of-part marker. Features at or after
-    /// this index are suppressed by rollback. `None` means the whole history.
+    /// The end-of-part marker, stored as the first feature *below* it. That
+    /// feature and everything after it are rolled back. `None` means the
+    /// marker is at the end of the history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub end_of_part: Option<usize>,
+    pub end_of_part: Option<FeatureId>,
+    /// Next id to hand out. Repaired before use by [`PartDocument::repair_ids`].
+    #[serde(default)]
     next_id: u32,
 }
 
@@ -37,6 +41,18 @@ pub enum LengthUnit {
     Cm,
     M,
     In,
+}
+
+impl LengthUnit {
+    /// Size of one unit in millimetres.
+    pub fn to_mm(self) -> f64 {
+        match self {
+            LengthUnit::Mm => 1.0,
+            LengthUnit::Cm => 10.0,
+            LengthUnit::M => 1000.0,
+            LengthUnit::In => 25.4,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -63,6 +79,26 @@ pub enum FeatureKind {
     Extrude(Extrude),
 }
 
+impl FeatureKind {
+    /// Ids of the earlier features this one depends on.
+    pub fn references(&self) -> Vec<FeatureId> {
+        match self {
+            FeatureKind::Sketch(_) => Vec::new(),
+            FeatureKind::Extrude(e) => vec![e.sketch],
+        }
+    }
+
+    /// Rewrites every feature reference through `map`. Merging uses this to
+    /// renumber features two branches added under the same id, so every new
+    /// kind of reference must be handled here.
+    pub fn remap_references(&mut self, mut map: impl FnMut(FeatureId) -> FeatureId) {
+        match self {
+            FeatureKind::Sketch(_) => {}
+            FeatureKind::Extrude(e) => e.sketch = map(e.sketch),
+        }
+    }
+}
+
 /// The three origin planes every part starts with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -80,11 +116,14 @@ pub struct Sketch {
     /// Offset of the sketch plane along the plane normal.
     #[serde(default)]
     pub offset: f64,
+    /// Closed loops. A loop inside another loop is a hole in it, so a
+    /// rectangle with a smaller rectangle inside extrudes to a frame.
     pub profiles: Vec<Profile>,
 }
 
 /// A closed loop of points in sketch coordinates. The closing segment from
-/// the last point back to the first is implicit.
+/// the last point back to the first is implicit; repeating the first point
+/// at the end is allowed and ignored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Profile {
     pub points: Vec<[f64; 2]>,
@@ -94,6 +133,20 @@ pub struct Profile {
 pub struct Extrude {
     pub sketch: FeatureId,
     pub extent: ExtrudeExtent,
+    #[serde(default)]
+    pub operation: BodyOperation,
+}
+
+/// How a feature's new volume combines with the existing part body, as in
+/// Inventor's Join / Cut / Intersect / New Solid buttons.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BodyOperation {
+    #[default]
+    Join,
+    Cut,
+    Intersect,
+    NewBody,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -105,10 +158,12 @@ pub enum ExtrudeExtent {
     Symmetric { distance: f64 },
 }
 
-#[derive(Debug, thiserror::Error, PartialEq)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq)]
 pub enum DocumentError {
     #[error("feature {0:?} does not exist")]
     MissingFeature(FeatureId),
+    #[error("feature id {0:?} is used more than once")]
+    DuplicateId(FeatureId),
     #[error("feature {0:?} is not a sketch")]
     NotASketch(FeatureId),
     #[error("feature {referrer:?} refers to {target:?}, which comes later in the history")]
@@ -116,7 +171,21 @@ pub enum DocumentError {
         referrer: FeatureId,
         target: FeatureId,
     },
+    #[error("{0} is not a finite number")]
+    NonFinite(String),
+    #[error("parameter name {0:?} is empty, invalid, or used twice")]
+    BadParameterName(String),
+    #[error("feature id {0:?} is out of range")]
+    IdOutOfRange(FeatureId),
+    #[error("document has more than {MAX_FEATURES} features")]
+    TooManyFeatures,
 }
+
+/// Far beyond any real part; stops corrupt or hostile files early.
+pub const MAX_FEATURES: usize = 100_000;
+/// Largest feature id a valid document may use. Far below `u32::MAX`, so
+/// handing out the next id can never overflow.
+pub const MAX_FEATURE_ID: u32 = 1 << 24;
 
 impl PartDocument {
     pub fn new(name: impl Into<String>, units: LengthUnit) -> Self {
@@ -132,8 +201,11 @@ impl PartDocument {
 
     /// Appends a feature to the end of the history and returns its id.
     pub fn add_feature(&mut self, name: impl Into<String>, kind: FeatureKind) -> FeatureId {
+        self.repair_ids();
+        // Ids in a valid document stay far below u32::MAX; an invalid one
+        // can repeat an id here, which validate() then reports.
         let id = FeatureId(self.next_id);
-        self.next_id += 1;
+        self.next_id = self.next_id.saturating_add(1);
         self.features.push(Feature {
             id,
             name: name.into(),
@@ -143,37 +215,94 @@ impl PartDocument {
         id
     }
 
+    /// Makes sure `next_id` is above every id in use, so documents edited or
+    /// merged outside this crate never hand out an id twice.
+    pub fn repair_ids(&mut self) {
+        let max = self.features.iter().map(|f| f.id.0).max().unwrap_or(0);
+        self.next_id = self.next_id.max(max.saturating_add(1));
+    }
+
+    /// The id [`PartDocument::add_feature`] would hand out next.
+    pub fn next_id(&self) -> FeatureId {
+        let max = self.features.iter().map(|f| f.id.0).max().unwrap_or(0);
+        FeatureId(self.next_id.max(max.saturating_add(1)))
+    }
+
+    /// Makes sure ids handed out from now on are at least `next`. Versioning
+    /// uses this so features added on different branches of one history
+    /// never get the same id.
+    pub fn reserve_ids(&mut self, next: FeatureId) {
+        self.next_id = self.next_id.max(next.0);
+    }
+
     pub fn feature(&self, id: FeatureId) -> Option<&Feature> {
         self.features.iter().find(|f| f.id == id)
     }
 
-    /// Features that take part in a rebuild: before the end-of-part marker
+    /// Features that take part in a rebuild: above the end-of-part marker
     /// and not suppressed.
     pub fn active_features(&self) -> impl Iterator<Item = &Feature> {
         let end = self
             .end_of_part
-            .unwrap_or(self.features.len())
-            .min(self.features.len());
+            .and_then(|id| self.features.iter().position(|f| f.id == id))
+            .unwrap_or(self.features.len());
         self.features[..end].iter().filter(|f| !f.suppressed)
     }
 
-    /// Checks that every reference points at an earlier sketch.
+    /// Checks ids, references, numbers and parameter names.
     pub fn validate(&self) -> Result<(), DocumentError> {
-        for (index, feature) in self.features.iter().enumerate() {
-            if let FeatureKind::Extrude(extrude) = &feature.kind {
-                let target_index = self
-                    .features
-                    .iter()
-                    .position(|f| f.id == extrude.sketch)
-                    .ok_or(DocumentError::MissingFeature(extrude.sketch))?;
-                if target_index >= index {
-                    return Err(DocumentError::ForwardReference {
-                        referrer: feature.id,
-                        target: extrude.sketch,
-                    });
+        let mut index = HashMap::with_capacity(self.features.len());
+        if self.features.len() > MAX_FEATURES {
+            return Err(DocumentError::TooManyFeatures);
+        }
+        for (i, feature) in self.features.iter().enumerate() {
+            if feature.id.0 == 0 || feature.id.0 > MAX_FEATURE_ID {
+                return Err(DocumentError::IdOutOfRange(feature.id));
+            }
+            if index.insert(feature.id, i).is_some() {
+                return Err(DocumentError::DuplicateId(feature.id));
+            }
+        }
+        if let Some(id) = self.end_of_part {
+            if !index.contains_key(&id) {
+                return Err(DocumentError::MissingFeature(id));
+            }
+        }
+
+        let mut names = HashSet::new();
+        for p in &self.parameters {
+            if !is_identifier(&p.name) || !names.insert(p.name.as_str()) {
+                return Err(DocumentError::BadParameterName(p.name.clone()));
+            }
+            finite(p.value, || format!("parameter {}", p.name))?;
+        }
+
+        for (i, feature) in self.features.iter().enumerate() {
+            let what = || format!("a value in feature {:?} ({})", feature.id, feature.name);
+            match &feature.kind {
+                FeatureKind::Sketch(sketch) => {
+                    finite(sketch.offset, what)?;
+                    for p in sketch.profiles.iter().flat_map(|p| &p.points) {
+                        finite(p[0], what)?;
+                        finite(p[1], what)?;
+                    }
                 }
-                if !matches!(self.features[target_index].kind, FeatureKind::Sketch(_)) {
-                    return Err(DocumentError::NotASketch(extrude.sketch));
+                FeatureKind::Extrude(extrude) => {
+                    let (ExtrudeExtent::Distance { distance }
+                    | ExtrudeExtent::Symmetric { distance }) = extrude.extent;
+                    finite(distance, what)?;
+                    let target = *index
+                        .get(&extrude.sketch)
+                        .ok_or(DocumentError::MissingFeature(extrude.sketch))?;
+                    if target >= i {
+                        return Err(DocumentError::ForwardReference {
+                            referrer: feature.id,
+                            target: extrude.sketch,
+                        });
+                    }
+                    if !matches!(self.features[target].kind, FeatureKind::Sketch(_)) {
+                        return Err(DocumentError::NotASketch(extrude.sketch));
+                    }
                 }
             }
         }
@@ -181,9 +310,47 @@ impl PartDocument {
     }
 }
 
+fn finite(value: f64, what: impl FnOnce() -> String) -> Result<(), DocumentError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(DocumentError::NonFinite(what()))
+    }
+}
+
+/// Characters that must not reach a terminal or a name from a file: control
+/// characters (Unicode Cc) and invisible format characters (Cf), such as the
+/// bidirectional overrides that can make "main\u{202e}" display as "main".
+pub fn is_unsafe_text_char(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}'
+            | '\u{890}'..='\u{891}' | '\u{8e2}' | '\u{180e}' | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}'
+            | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{110bd}' | '\u{110cd}'
+            | '\u{13430}'..='\u{1343f}' | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
+}
+
+/// Parameter names must work in expressions: a letter or `_`, then letters,
+/// digits or `_`.
+fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_alphabetic() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn empty_sketch() -> FeatureKind {
+        FeatureKind::Sketch(Sketch {
+            plane: OriginPlane::XZ,
+            offset: 0.0,
+            profiles: vec![],
+        })
+    }
 
     fn block() -> PartDocument {
         let mut doc = PartDocument::new("Block", LengthUnit::Mm);
@@ -202,6 +369,7 @@ mod tests {
             FeatureKind::Extrude(Extrude {
                 sketch,
                 extent: ExtrudeExtent::Distance { distance: 10.0 },
+                operation: BodyOperation::Join,
             }),
         );
         doc
@@ -218,8 +386,20 @@ mod tests {
     #[test]
     fn end_of_part_rolls_back_history() {
         let mut doc = block();
-        doc.end_of_part = Some(1);
+        doc.end_of_part = Some(FeatureId(2));
         assert_eq!(doc.active_features().count(), 1);
+    }
+
+    #[test]
+    fn end_of_part_follows_its_feature_when_reordered() {
+        let mut doc = block();
+        let extra = doc.add_feature("Sketch2", empty_sketch());
+        doc.end_of_part = Some(extra);
+        assert_eq!(doc.active_features().count(), 2);
+        // Move Sketch2 to the top: the marker moves with it.
+        let moved = doc.features.pop().unwrap();
+        doc.features.insert(0, moved);
+        assert_eq!(doc.active_features().count(), 0);
     }
 
     #[test]
@@ -233,10 +413,145 @@ mod tests {
     }
 
     #[test]
+    fn rejects_duplicate_ids_and_missing_marker() {
+        let mut doc = block();
+        doc.features[1].id = FeatureId(1);
+        assert_eq!(
+            doc.validate(),
+            Err(DocumentError::DuplicateId(FeatureId(1)))
+        );
+
+        let mut doc = block();
+        doc.end_of_part = Some(FeatureId(99));
+        assert_eq!(
+            doc.validate(),
+            Err(DocumentError::MissingFeature(FeatureId(99)))
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_range_ids() {
+        for bad in [0, MAX_FEATURE_ID + 1, u32::MAX - 1, u32::MAX] {
+            let mut doc = block();
+            doc.features[1].id = FeatureId(bad);
+            assert_eq!(
+                doc.validate(),
+                Err(DocumentError::IdOutOfRange(FeatureId(bad)))
+            );
+            // Adding features to such a document never panics.
+            doc.add_feature("S", empty_sketch());
+            doc.add_feature("S", empty_sketch());
+            assert!(doc.validate().is_err());
+        }
+        let mut doc = block();
+        doc.features[1].id = FeatureId(MAX_FEATURE_ID);
+        assert_eq!(doc.validate(), Ok(()));
+        doc.add_feature("S", empty_sketch());
+        assert!(doc.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_non_finite_values() {
+        let mut doc = block();
+        if let FeatureKind::Extrude(e) = &mut doc.features[1].kind {
+            e.extent = ExtrudeExtent::Distance { distance: f64::NAN };
+        }
+        assert!(matches!(doc.validate(), Err(DocumentError::NonFinite(_))));
+
+        let mut doc = block();
+        if let FeatureKind::Sketch(s) = &mut doc.features[0].kind {
+            s.profiles[0].points[1][0] = f64::INFINITY;
+        }
+        assert!(matches!(doc.validate(), Err(DocumentError::NonFinite(_))));
+    }
+
+    #[test]
+    fn rejects_bad_parameter_names() {
+        for names in [vec![""], vec!["2width"], vec!["a b"], vec!["d0", "d0"]] {
+            let mut doc = block();
+            doc.parameters = names
+                .into_iter()
+                .map(|n| Parameter {
+                    name: n.into(),
+                    value: 1.0,
+                    comment: String::new(),
+                })
+                .collect();
+            assert!(matches!(
+                doc.validate(),
+                Err(DocumentError::BadParameterName(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn repairs_next_id_after_load() {
+        let json = r#"{"name":"P","units":"mm","features":[
+            {"id":7,"name":"S","kind":{"type":"sketch","plane":"XY","profiles":[]}}]}"#;
+        let mut doc: PartDocument = serde_json::from_str(json).unwrap();
+        assert_eq!(doc.add_feature("S2", empty_sketch()), FeatureId(8));
+    }
+
+    #[test]
     fn json_round_trip() {
-        let doc = block();
+        let mut doc = block();
+        doc.parameters.push(Parameter {
+            name: "width".into(),
+            value: 40.0,
+            comment: "overall".into(),
+        });
+        doc.features[1].suppressed = true;
+        doc.end_of_part = Some(FeatureId(2));
         let json = serde_json::to_string(&doc).unwrap();
         let back: PartDocument = serde_json::from_str(&json).unwrap();
         assert_eq!(doc, back);
+    }
+
+    #[test]
+    fn references_and_remapping() {
+        let mut doc = block();
+        assert!(doc.features[0].kind.references().is_empty());
+        assert_eq!(doc.features[1].kind.references(), [FeatureId(1)]);
+        doc.features[1]
+            .kind
+            .remap_references(|id| FeatureId(id.0 + 10));
+        assert_eq!(doc.features[1].kind.references(), [FeatureId(11)]);
+    }
+
+    #[test]
+    fn next_id_accounts_for_ids_in_use() {
+        let mut doc = block();
+        assert_eq!(doc.next_id(), FeatureId(3));
+        doc.features[0].id = FeatureId(41);
+        assert_eq!(doc.next_id(), FeatureId(42));
+    }
+
+    #[test]
+    fn reserve_ids_only_raises() {
+        let mut doc = block();
+        doc.reserve_ids(FeatureId(10));
+        assert_eq!(doc.next_id(), FeatureId(10));
+        doc.reserve_ids(FeatureId(5));
+        assert_eq!(doc.add_feature("S", empty_sketch()), FeatureId(10));
+    }
+
+    #[test]
+    fn unsafe_text_chars() {
+        for c in [
+            '\0',
+            '\n',
+            '\u{1b}',
+            '\u{7f}',
+            '\u{9b}',
+            '\u{202e}',
+            '\u{200b}',
+            '\u{feff}',
+            '\u{e0041}',
+        ] {
+            assert!(is_unsafe_text_char(c), "{c:?}");
+        }
+        for c in ['a', 'é', ' ', '-', '中', 'z'] {
+            assert!(!is_unsafe_text_char(c), "{c:?}");
+        }
     }
 }
