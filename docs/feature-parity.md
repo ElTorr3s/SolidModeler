@@ -15,7 +15,8 @@ Each feature appears once. When the products have it under different names,
 the row gives each name. A `—` in a column means that product has no equivalent,
 so the feature is unique to the other one.
 
-Update the status in the same PR that lands the work, then refresh the
+Statuses are checked against `main` as of 2 November 2026. Update the status
+in the same PR that lands the work, then refresh the
 summary with `python3 docs/parity-summary.py`.
 
 ## How to read the tables
@@ -53,11 +54,11 @@ vendor's cloud services. They stay listed so nothing gets forgotten.
 <!-- summary:start -->
 | Environment | Items | Inventor and SolidWorks | Inventor only | SolidWorks only | From Onshape | Ours only | Done | In progress |
 |---|---|---|---|---|---|---|---|---|
-| Core document and history | 25 | 21 | 0 | 4 | 0 | 0 | 0 | 5 |
-| Sketch (2D) | 69 | 59 | 2 | 8 | 0 | 0 | 0 | 1 |
+| Core document and history | 25 | 21 | 0 | 4 | 0 | 0 | 0 | 6 |
+| Sketch (2D) | 69 | 59 | 2 | 8 | 0 | 0 | 0 | 21 |
 | 3D sketch and curves | 15 | 13 | 0 | 2 | 0 | 0 | 0 | 0 |
-| Part modeling | 86 | 61 | 4 | 21 | 0 | 0 | 0 | 1 |
-| Parameters, properties and automation | 24 | 18 | 5 | 1 | 0 | 0 | 0 | 1 |
+| Part modeling | 86 | 61 | 4 | 21 | 0 | 0 | 0 | 3 |
+| Parameters, properties and automation | 24 | 18 | 5 | 1 | 0 | 0 | 0 | 2 |
 | Sheet metal | 31 | 22 | 2 | 7 | 0 | 0 | 0 | 0 |
 | Surfacing and freeform | 24 | 11 | 7 | 6 | 0 | 0 | 0 | 0 |
 | Plastic part and mold | 10 | 7 | 3 | 0 | 0 | 0 | 0 | 0 |
@@ -67,12 +68,12 @@ vendor's cloud services. They stay listed so nothing gets forgotten.
 | Drawings | 67 | 56 | 2 | 9 | 0 | 0 | 0 | 0 |
 | Model-based definition | 4 | 3 | 0 | 1 | 0 | 0 | 0 | 0 |
 | Presentations and animation | 8 | 7 | 1 | 0 | 0 | 0 | 0 | 0 |
-| Inspection, analysis and simulation | 25 | 11 | 2 | 12 | 0 | 0 | 0 | 0 |
+| Inspection, analysis and simulation | 25 | 11 | 2 | 12 | 0 | 0 | 0 | 1 |
 | Tube, pipe and electrical routing | 11 | 11 | 0 | 0 | 0 | 0 | 0 | 0 |
-| File I/O and interoperability | 26 | 24 | 1 | 0 | 0 | 1 | 1 | 2 |
-| UI, viewport and navigation | 37 | 32 | 0 | 3 | 0 | 2 | 0 | 0 |
-| Data management and version control | 29 | 1 | 0 | 0 | 28 | 0 | 0 | 0 |
-| **Total** | **591** | **429** | **39** | **92** | **28** | **3** | **1** | **10** |
+| File I/O and interoperability | 26 | 24 | 1 | 0 | 0 | 1 | 2 | 4 |
+| UI, viewport and navigation | 37 | 32 | 0 | 3 | 0 | 2 | 3 | 5 |
+| Data management and version control | 29 | 1 | 0 | 0 | 28 | 0 | 0 | 7 |
+| **Total** | **591** | **429** | **39** | **92** | **28** | **3** | **5** | **49** |
 <!-- summary:end -->
 
 ---
@@ -81,11 +82,11 @@ vendor's cloud services. They stay listed so nothing gets forgotten.
 
 | Inventor | SolidWorks | Step | Status | Notes |
 |---|---|---|---|---|
-| Part (.ipt) | Part (.sldprt) | 1 | in progress | `PartDocument` with name, units, parameters, features |
-| Model browser | FeatureManager design tree | 1 | in progress | Flat ordered list; no folders or nesting yet |
+| Part (.ipt) | Part (.sldprt) | 1 | in progress | `PartDocument`; opened and saved by the app |
+| Model browser | FeatureManager design tree | 1 | in progress | App model browser lists the features; no folders or nesting yet |
 | Origin planes, axes, center point | Origin, Front/Top/Right planes | 1 | in progress | XY/YZ/XZ planes exist; no origin axes or point |
-| End of Part marker | Rollback bar | 1 | in progress | `end_of_part` stored; no UI to drag it yet |
-| Suppress features | Suppress / unsuppress | 1 | in progress | `suppressed` flag stored on each feature |
+| End of Part marker | Rollback bar | 1 | in progress | Roll back and forward from the app's model browser |
+| Suppress features | Suppress / unsuppress | 1 | in progress | Suppress and unsuppress from the app's model browser |
 | Edit feature, edit sketch | Edit feature, edit sketch | 3 | not started | |
 | Reorder features | Reorder features | 3 | not started | Dependency checks on drop |
 | Delete feature (consume or retain dependents) | Delete (with absorbed features) | 3 | not started | |
@@ -93,7 +94,7 @@ vendor's cloud services. They stay listed so nothing gets forgotten.
 | Sick feature markers, Design Doctor | What's Wrong, rebuild errors | 3 | not started | |
 | — | FeatureXpert | 6 | not started | Auto-fixes failing fillets and drafts |
 | — | Freeze bar | 6 | not started | Locks features above the bar from rebuilding |
-| Stable topological naming | Stable face/edge IDs | 2 | not started | Not a command; needed so references survive edits |
+| Stable topological naming | Stable face/edge IDs | 2 | in progress | Persistent naming library (`sm-naming`); not yet used by features |
 | Parent/child relationships | Parent/Child | 3 | not started | |
 | Browser folders | Folders | 6 | not started | |
 | Rename nodes | Rename | 3 | not started | |
@@ -115,7 +116,7 @@ vendor's cloud services. They stay listed so nothing gets forgotten.
 |---|---|---|---|---|
 | Start 2D Sketch on plane | Sketch on plane | 1 | in progress | Origin planes with offset; closed polylines only |
 | Sketch on face / work plane | Sketch on face / plane | 3 | not started | |
-| Line (with arc gesture) | Line, Centerline, Midpoint Line | 3 | not started | |
+| Line (with arc gesture) | Line, Centerline, Midpoint Line | 3 | in progress | In the sketch solver (`sm-sketch`); no sketch UI in the app yet |
 | Spline: control vertex | Style Spline | 3 | not started | |
 | Spline: interpolation | Spline | 3 | not started | |
 | — | Spline on Surface | 10 | not started | |
@@ -123,10 +124,10 @@ vendor's cloud services. They stay listed so nothing gets forgotten.
 | Bridge Curve | — | 6 | not started | |
 | — | Conic | 6 | not started | |
 | — | Parabola | 6 | not started | |
-| Circle: center point | Circle | 3 | not started | |
+| Circle: center point | Circle | 3 | in progress | In the sketch solver (`sm-sketch`); no sketch UI in the app yet |
 | Circle: tangent | Perimeter Circle | 3 | not started | |
 | Ellipse | Ellipse, Partial Ellipse | 3 | not started | |
-| Arc: three point, tangent, center point | 3 Point Arc, Tangent Arc, Centerpoint Arc | 3 | not started | |
+| Arc: three point, tangent, center point | 3 Point Arc, Tangent Arc, Centerpoint Arc | 3 | in progress | Center-point arcs in the sketch solver; no drawing tools yet |
 | Rectangle: two point, three point, center variants | Corner, Center, 3 Point Corner, 3 Point Center Rectangle, Parallelogram | 3 | not started | |
 | Slot: all five types | Straight, Centerpoint Straight, 3 Point Arc, Centerpoint Arc Slot | 3 | not started | |
 | Polygon | Polygon | 3 | not started | |
@@ -163,29 +164,29 @@ vendor's cloud services. They stay listed so nothing gets forgotten.
 
 | Inventor | SolidWorks | Step | Status | Notes |
 |---|---|---|---|---|
-| 2D constraint solver | 2D relation solver | 3 | not started | Core of the sketcher |
-| Dimension | Smart Dimension | 3 | not started | Linear, aligned, radial, diameter, angular |
+| 2D constraint solver | 2D relation solver | 3 | in progress | Sparse solver in `sm-sketch` with DOF and over-constraint detection; not in the app yet |
+| Dimension | Smart Dimension | 3 | in progress | Distance, horizontal/vertical, point-line, angle, radius, diameter in the solver; no UI yet |
 | Driven dimension | Driven dimension | 3 | not started | |
-| Dimension expressions | Equations in dimensions | 3 | not started | `width / 2` style |
+| Dimension expressions | Equations in dimensions | 3 | in progress | Expressions with units in `sm-expr`; not yet wired to dimensions |
 | Automatic Dimensions and Constraints | Fully Define Sketch | 3 | not started | |
-| Coincident | Coincident | 3 | not started | |
-| — | Midpoint | 3 | not started | Inventor uses coincident to a midpoint |
-| Collinear | Collinear | 3 | not started | |
-| Concentric | Concentric, Coradial | 3 | not started | |
-| Fix | Fix | 3 | not started | |
-| Parallel | Parallel | 3 | not started | |
-| Perpendicular | Perpendicular | 3 | not started | |
-| Horizontal / Vertical | Horizontal / Vertical | 3 | not started | |
-| Tangent | Tangent | 3 | not started | |
+| Coincident | Coincident | 3 | in progress | In the sketch solver (`sm-sketch`); no sketch UI in the app yet |
+| — | Midpoint | 3 | in progress | In the sketch solver (`sm-sketch`); no sketch UI in the app yet |
+| Collinear | Collinear | 3 | in progress | In the sketch solver (`sm-sketch`); no sketch UI in the app yet |
+| Concentric | Concentric, Coradial | 3 | in progress | In the sketch solver (`sm-sketch`); no sketch UI in the app yet |
+| Fix | Fix | 3 | in progress | In the sketch solver (`sm-sketch`); no sketch UI in the app yet |
+| Parallel | Parallel | 3 | in progress | In the sketch solver (`sm-sketch`); no sketch UI in the app yet |
+| Perpendicular | Perpendicular | 3 | in progress | In the sketch solver (`sm-sketch`); no sketch UI in the app yet |
+| Horizontal / Vertical | Horizontal / Vertical | 3 | in progress | In the sketch solver (`sm-sketch`); no sketch UI in the app yet |
+| Tangent | Tangent | 3 | in progress | In the sketch solver (`sm-sketch`); no sketch UI in the app yet |
 | Smooth (G2) | Equal Curvature | 3 | not started | |
-| Symmetric | Symmetric | 3 | not started | |
-| Equal | Equal | 3 | not started | |
+| Symmetric | Symmetric | 3 | in progress | In the sketch solver (`sm-sketch`); no sketch UI in the app yet |
+| Equal | Equal | 3 | in progress | In the sketch solver (`sm-sketch`); no sketch UI in the app yet |
 | — | Merge, Pierce | 6 | not started | Pierce ties a sketch point to a 3D curve |
 | Constraint inference | Automatic relations | 3 | not started | |
 | Show / Delete Constraints | Display/Delete Relations | 3 | not started | |
 | Relax Mode | Drag with SketchXpert | 3 | not started | |
-| Degrees of freedom, fully constrained colour | Under/fully/over defined colours | 3 | not started | |
-| Over-constrained prompt | SketchXpert | 3 | not started | |
+| Degrees of freedom, fully constrained colour | Under/fully/over defined colours | 3 | in progress | DOF count in the solver; no colours yet |
+| Over-constrained prompt | SketchXpert | 3 | in progress | Over-constraint detection in the solver; no prompt yet |
 
 ### Blocks and tools
 
@@ -194,7 +195,7 @@ vendor's cloud services. They stay listed so nothing gets forgotten.
 | Sketch Blocks | Blocks | 10 | not started | Skeleton and layout workflows |
 | Share Sketch | Shared sketch | 6 | not started | |
 | Sketch Doctor | Check Sketch for Feature, Repair Sketch | 3 | not started | |
-| Profile selection with nested loops | Contour Select | 3 | not started | |
+| Profile selection with nested loops | Contour Select | 3 | in progress | Multi-region sketches: a loop inside a loop is a hole; no picking UI yet |
 | Slice Graphics | — | 4 | not started | |
 | Layout part | Layout sketch | 7 | not started | |
 
@@ -224,8 +225,8 @@ vendor's cloud services. They stay listed so nothing gets forgotten.
 
 | Inventor | SolidWorks | Step | Status | Notes |
 |---|---|---|---|---|
-| Extrude: distance, symmetric | Extruded Boss: Blind, Mid Plane | 1 | in progress | New solid only |
-| Extrude: join / cut / intersect / new solid | Extruded Boss / Cut, Merge result | 2 | not started | Needs booleans |
+| Extrude: distance, symmetric | Extruded Boss: Blind, Mid Plane | 1 | in progress | In the kernel; no extrude command in the app yet |
+| Extrude: join / cut / intersect / new solid | Extruded Boss / Cut, Merge result | 2 | in progress | Join, cut, intersect, new body in the kernel; no app command yet |
 | Extrude: two directions, asymmetric | Direction 1 / Direction 2 | 3 | not started | |
 | Extrude: to, to next, through all, between | Up to Vertex/Surface/Body, Up to Next, Through All | 3 | not started | |
 | — | Offset from Surface end condition, Thin Feature | 6 | not started | |
@@ -242,7 +243,7 @@ vendor's cloud services. They stay listed so nothing gets forgotten.
 | Emboss | Wrap (emboss, deboss, scribe) | 6 | not started | |
 | Decal | Decals | 10 | not started | |
 | Derive | Insert Part, Mirror Part | 7 | not started | Link-in with scale, mirror, body selection |
-| Import (base feature) | Imported feature | 2 | not started | See File I/O |
+| Import (base feature) | Imported feature | 2 | in progress | Sandboxed STEP import in `sm-occt`; not used by the app yet |
 | — | FeatureWorks (feature recognition on imports) | 11 | not started | |
 | Primitives (box, cylinder, sphere, torus) | — | 6 | not started | |
 | — | Dome | 6 | not started | |
@@ -335,9 +336,9 @@ vendor's cloud services. They stay listed so nothing gets forgotten.
 
 | Inventor | SolidWorks | Step | Status | Notes |
 |---|---|---|---|---|
-| User Parameters | Global Variables | 1 | in progress | Name, value, comment stored; nothing references them yet |
+| User Parameters | Global Variables | 1 | in progress | Stored in the part; expressions with units in `sm-expr`, not wired yet |
 | Model parameters (d0, d1…) | Dimension names (D1@Sketch1) | 3 | not started | |
-| Equations in parameters, units | Equations | 3 | not started | |
+| Equations in parameters, units | Equations | 3 | in progress | `sm-expr`: units, dimension checks, Inventor functions; not wired to parameters yet |
 | Text and True/False parameters | — | 10 | not started | |
 | Multi-value lists | — | 10 | not started | |
 | Key / Export parameters | Link to custom property | 6 | not started | |
@@ -690,7 +691,7 @@ parts. Same tools, different document model.
 | — | Deviation Analysis | 10 | not started | |
 | — | Symmetry Check | 10 | not started | |
 | — | Geometry Analysis (short edges, sliver faces) | 10 | not started | |
-| Model integrity check | Check entity | 2 | not started | Validates the kernel after rebuild and on import |
+| Model integrity check | Check entity | 2 | in progress | Imported B-reps are screened in `sm-occt`; no check after rebuild yet |
 | — | Compare Documents, Compare Geometry | 10 | not started | |
 | — | Feature Statistics | 6 | not started | Rebuild time per feature |
 | Stress Analysis (linear static) | Simulation (SimulationXpress, static) | 11 | not started | |
@@ -728,11 +729,11 @@ parts. Same tools, different document model.
 |---|---|---|---|---|
 | Native part format | Native part format | 1 | done | `.smp`, see [smp-format.md](smp-format.md) |
 | STEP export: geometry | STEP export | 1 | in progress | AP214 schema via truck |
-| STEP export: AP242 | STEP AP242 | 2 | not started | |
-| STEP export: colours, names | STEP with appearances | 6 | not started | |
+| STEP export: AP242 | STEP AP242 | 2 | in progress | AP242 export in `sm-occt`; the app and `smcli` still write AP214 via truck |
+| STEP export: colours, names | STEP with appearances | 6 | in progress | Names and colours in `sm-occt` export; not used by the app yet |
 | STEP export: assemblies | STEP assembly structure | 7 | not started | |
 | STEP export: PMI | STEP 242 with 3D PMI | 8 | not started | |
-| STEP import: parts | STEP import | 2 | not started | |
+| STEP import: parts | STEP import | 2 | in progress | Sandboxed AP242 import in `sm-occt`; not used by the app yet |
 | STEP import: assemblies | STEP import (assembly) | 7 | not started | |
 | AnyCAD reference (linked import) | 3D Interconnect | 7 | not started | Updates when the source file changes |
 | IGES | IGES | 10 | not started | |
@@ -751,14 +752,14 @@ parts. Same tools, different document model.
 | Image export | Save as image | 4 | not started | |
 | Templates | Templates | 6 | not started | |
 | Batch migration | Task Scheduler conversion | 11 | not started | |
-| — | — | 1 | in progress | Command-line rebuild and export (`smcli`); neither product has one |
+| — | — | 1 | done | Command-line rebuild, export and version commands (`smcli`); neither product has one |
 
 ## UI, viewport and navigation
 
 | Inventor | SolidWorks | Step | Status | Notes |
 |---|---|---|---|---|
-| Application window | Application window | 4 | not started | Wayland-native (winit + wgpu) |
-| — | — | 4 | not started | Follows the OS and Omarchy theme live; neither product has this |
+| Application window | Application window | 4 | done | Wayland-native (winit + wgpu) |
+| — | — | 4 | done | Follows the OS and Omarchy theme live; neither product has this |
 | Ribbon | CommandManager | 4 | not started | |
 | Model browser search and filter | Design tree filter | 4 | not started | |
 | Property panels | PropertyManager | 4 | not started | |
@@ -767,16 +768,16 @@ parts. Same tools, different document model.
 | — | Breadcrumbs, context toolbars | 4 | not started | |
 | Command aliases (E, R, H, F, D, L…) | Keyboard shortcuts | 4 | not started | Default to Inventor's aliases |
 | Customize shortcuts and ribbon | Customize | 4 | not started | |
-| ViewCube | View Selector cube | 4 | not started | |
+| ViewCube | View Selector cube | 4 | in progress | View cube in the app |
 | Navigation bar (pan, zoom, orbit, look at) | Heads-up View Toolbar | 4 | not started | |
-| Mouse presets | Mouse settings | 4 | not started | |
+| Mouse presets | Mouse settings | 4 | in progress | Inventor defaults: MMB pan, Shift+MMB or F4 orbit, wheel zoom at cursor; no other presets |
 | 3Dconnexion SpaceMouse | 3Dconnexion SpaceMouse | 4 | not started | libspnav on Linux |
-| Home View, previous/next | Previous View | 4 | not started | |
-| Orthographic / perspective | Perspective | 4 | not started | |
+| Home View, previous/next | Previous View | 4 | in progress | Home view on F6; no previous/next yet |
+| Orthographic / perspective | Perspective | 4 | in progress | Orthographic only |
 | Visual styles | Display styles | 4 | not started | Shaded, edges, wireframe, hidden lines |
 | Shadows, reflections, ambient occlusion | RealView, ambient occlusion | 4 | not started | |
 | Ray tracing | PhotoView 360 / Visualize | 11 | not started | *(low priority)* |
-| Selection priority, Select Other | Selection filters, Select Other | 4 | not started | |
+| Selection priority, Select Other | Selection filters, Select Other | 4 | in progress | Face picking in the viewport; no priority filter or Select Other yet |
 | Window / crossing selection | Box / lasso selection | 4 | not started | |
 | — | Magnifying Glass | 4 | not started | |
 | Preselection highlight | Dynamic highlight | 4 | not started | |
@@ -788,7 +789,7 @@ parts. Same tools, different document model.
 | Command search | Search commands | 4 | not started | |
 | Home page with recent files | Welcome dialog | 4 | not started | |
 | Command repeat | Repeat last command | 4 | not started | |
-| Drag-and-drop file open | Drag-and-drop file open | 4 | not started | |
+| Drag-and-drop file open | Drag-and-drop file open | 4 | done | |
 | — | Task Pane (design library, file explorer, appearances) | 4 | not started | |
 | Large model graphics (LOD, culling) | Level of detail, graphics performance | 4 | not started | |
 | — | — | 4 | not started | HiDPI and fractional scaling on Wayland |
@@ -807,14 +808,14 @@ never need to know git to branch or merge a design.
 |---|---|---|---|---|---|
 | Document (part studios, assemblies, drawings and files as tabs) | Project folder | — | 7 | not started | One local folder or container per design |
 | No Save button: every change persisted | — | Auto-recover | 5 | not started | Write each feature edit to disk as it happens |
-| History panel (every change, restorable) | OldVersions folder | Backup copies | 5 | not started | Full edit history per document, never lost |
-| Restore to any point in history | Restore old version | Restore backup | 5 | not started | |
-| Versions (named, immutable snapshots) | Vault versions | PDM versions | 5 | not started | |
-| Branches (workspaces) | — | — | 5 | not started | Try design alternatives without copying files |
-| Merge branches | — | — | 5 | not started | Feature-tree merge; needs stable topological naming (step 2) |
-| Merge conflict resolution on features and parameters | — | — | 5 | not started | |
+| History panel (every change, restorable) | OldVersions folder | Backup copies | 5 | in progress | Saved versions kept with the part across app saves; no per-edit history or panel yet |
+| Restore to any point in history | Restore old version | Restore backup | 5 | in progress | Checkout any version or tag from `smcli` |
+| Versions (named, immutable snapshots) | Vault versions | PDM versions | 5 | in progress | Versions and tags in `sm-history`, driven from `smcli`; no app UI yet |
+| Branches (workspaces) | — | — | 5 | in progress | Branches in `sm-history` and `smcli`; no app UI yet |
+| Merge branches | — | — | 5 | in progress | Feature-level 3-way merge in `sm-history` and `smcli`; no app UI yet |
+| Merge conflict resolution on features and parameters | — | — | 5 | in progress | Conflicts are reported; resolve by taking ours or theirs |
 | Version graph view | — | — | 5 | not started | |
-| Compare (feature tree, parameters and geometry between versions) | — | Compare Documents, Compare Geometry | 5 | not started | `.smp` feature tree as diffable text |
+| Compare (feature tree, parameters and geometry between versions) | — | Compare Documents, Compare Geometry | 5 | in progress | Feature-level changes per version in `smcli log`; no geometry compare yet |
 | Undo across sessions via history | — | — | 5 | not started | |
 | Edit attribution (who changed what, when) | Vault history | PDM history | 5 | not started | Author from local identity (e.g. git config) |
 | References pinned to a version of another document | — | — | 7 | not started | Derive or place at a version, not "latest file on disk" |
