@@ -4,11 +4,12 @@
 //! Version commands (commit, log, branch, tag, checkout, merge) are in
 //! `history.rs`.
 
-/// Like `println!`, but a failed write (such as a closed pipe in
-/// `smcli log | head`) returns an error instead of panicking.
+/// Like `println!`, but never panics. A closed pipe (`smcli log | head`)
+/// is ignored, so a command that prints before saving (merge, checkout)
+/// still saves; any other write error is returned.
 macro_rules! outln {
     ($($arg:tt)*) => {
-        writeln!(std::io::stdout(), $($arg)*)?
+        $crate::out(format_args!($($arg)*))?
     };
 }
 
@@ -46,8 +47,6 @@ fn main() -> ExitCode {
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        // The reader stopped reading (`smcli log | head`): nothing is wrong.
-        Err(e) if is_broken_pipe(e.as_ref()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {}", printable(&e.to_string()));
             ExitCode::FAILURE
@@ -150,9 +149,11 @@ fn rebuild(input: &str, step_out: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn is_broken_pipe(e: &(dyn std::error::Error + 'static)) -> bool {
-    e.downcast_ref::<std::io::Error>()
-        .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe)
+fn out(args: std::fmt::Arguments) -> std::io::Result<()> {
+    match writeln!(std::io::stdout(), "{args}") {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        result => result,
+    }
 }
 
 /// STEP headers record a file name, not the local path it was written to.

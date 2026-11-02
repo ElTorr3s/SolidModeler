@@ -15,7 +15,6 @@ use crate::{printable, Result};
 use sm_document::{ExtrudeExtent, FeatureKind};
 use sm_format::SmpFile;
 use sm_history::{History, MergeOutcome, Resolutions, Side};
-use std::io::Write;
 use std::path::Path;
 
 pub const USAGE: &str = "smcli commit <in.smp> <message> | log <in.smp> | \
