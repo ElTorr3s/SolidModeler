@@ -23,6 +23,7 @@ exported to STEP. There is no GUI yet.
 | `crates/sm-history` | Versions, branches, tags and feature-level merges ([design](docs/versioning.md)) |
 | `crates/sm-format` | Reads and writes `.smp` files ([spec](docs/smp-format.md)) |
 | `crates/sm-step` | STEP export (geometry only) |
+| `crates/sm-sketch` | 2D sketch geometry and constraint solver (degrees of freedom, over-constraint detection) |
 | `apps/smcli` | Command-line driver until the GUI exists |
 
 ## Try it
