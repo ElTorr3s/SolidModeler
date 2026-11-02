@@ -223,7 +223,7 @@ impl Mesh {
             let Some(tris) = self.indices.get(range) else {
                 continue;
             };
-            for tri in tris.chunks_exact(3) {
+            for tri in tris.as_chunks::<3>().0 {
                 let p = |k: usize| self.positions.get(tri[k] as usize).copied();
                 let (Some(a), Some(b), Some(c)) = (p(0), p(1), p(2)) else {
                     continue;

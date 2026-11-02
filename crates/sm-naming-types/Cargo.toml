@@ -4,6 +4,8 @@ description = "Persistent topology names as plain data, for crates that store re
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 
 [dependencies]
 # Only for FeatureId; moves to sm-ids when that crate lands, so sm-document
