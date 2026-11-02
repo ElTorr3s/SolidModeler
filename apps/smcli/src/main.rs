@@ -1,5 +1,10 @@
 //! `smcli demo <out.smp>`              write a sample part (block, pocket, notch)
 //! `smcli rebuild <in.smp> [out.step]` replay the history, report bodies, optionally export STEP
+//!
+//! Version commands (commit, log, branch, tag, checkout, merge) are in
+//! `history.rs`.
+
+mod history;
 
 use sm_document::{
     BodyOperation, Extrude, ExtrudeExtent, FeatureKind, LengthUnit, OriginPlane, PartDocument,
@@ -21,15 +26,19 @@ fn main() -> ExitCode {
         ["demo", out] => demo(out),
         ["rebuild", input] => rebuild(input, None),
         ["rebuild", input, step] => rebuild(input, Some(step)),
-        _ => {
-            eprintln!("usage: smcli demo <out.smp> | smcli rebuild <in.smp> [out.step]");
-            return ExitCode::from(2);
-        }
+        other => match history::run(other) {
+            Some(result) => result,
+            None => {
+                eprintln!("usage: smcli demo <out.smp> | smcli rebuild <in.smp> [out.step]");
+                eprintln!("       {}", history::USAGE);
+                return ExitCode::from(2);
+            }
+        },
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", printable(&e.to_string()));
             ExitCode::FAILURE
         }
     }
@@ -101,7 +110,7 @@ fn rebuild(input: &str, step_out: Option<&str>) -> Result<()> {
     let doc = &file.document;
     println!(
         "{} (format v{}, cache {})",
-        doc.name,
+        printable(&doc.name),
         file.manifest.version,
         if file.cached_step.is_some() {
             "valid"
@@ -113,7 +122,7 @@ fn rebuild(input: &str, step_out: Option<&str>) -> Result<()> {
         println!(
             "  {:>3}  {}{}",
             feature.id.0,
-            feature.name,
+            printable(&feature.name),
             if feature.suppressed {
                 " (suppressed)"
             } else {
@@ -135,4 +144,31 @@ fn file_name(path: &str) -> String {
     Path::new(path)
         .file_name()
         .map_or_else(|| path.to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+/// Replaces control and invisible characters, so names, messages and
+/// errors from a file can't send escape sequences to the terminal or
+/// disguise themselves with bidirectional overrides.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if sm_document::is_unsafe_text_char(c) {
+                '\u{fffd}'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::printable;
+
+    #[test]
+    fn printable_replaces_control_and_invisible_characters() {
+        assert_eq!(printable("a\u{1b}[31mb\n"), "a\u{fffd}[31mb\u{fffd}");
+        assert_eq!(printable("main\u{202e}x"), "main\u{fffd}x");
+        assert_eq!(printable("Révision B"), "Révision B");
+    }
 }
