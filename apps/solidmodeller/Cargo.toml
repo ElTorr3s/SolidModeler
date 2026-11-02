@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 sm-document.workspace = true
 sm-format.workspace = true
+sm-history.workspace = true
 sm-kernel.workspace = true
 sm-mesh.workspace = true
 sm-step.workspace = true

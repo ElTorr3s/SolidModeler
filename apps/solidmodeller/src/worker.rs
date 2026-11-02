@@ -9,6 +9,7 @@
 
 use crate::mesh::{self, SceneMesh};
 use sm_document::PartDocument;
+use sm_history::History;
 use sm_kernel::{Budget, Model};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -26,9 +27,17 @@ enum Job {
     Save {
         path: PathBuf,
         doc: PartDocument,
+        /// The part's versions, written back so a save never drops them.
+        history: Option<Box<History>>,
         /// The rebuild generation `doc` corresponds to.
         generation: u64,
     },
+}
+
+/// A loaded file: its working document and version history, if any.
+pub struct Loaded {
+    pub doc: PartDocument,
+    pub history: Option<Box<History>>,
 }
 
 pub enum Done {
@@ -38,7 +47,7 @@ pub enum Done {
     },
     Opened {
         path: PathBuf,
-        result: Result<PartDocument, String>,
+        result: Result<Loaded, String>,
     },
     Saved {
         path: PathBuf,
@@ -100,11 +109,13 @@ impl Worker {
         self.send(Job::Open(path));
     }
 
-    /// Saves `doc`, which must be the document last passed to [`rebuild`].
-    pub fn save(&self, path: PathBuf, doc: PartDocument) {
+    /// Saves `doc`, which must be the document last passed to [`rebuild`],
+    /// with the history it was opened with.
+    pub fn save(&self, path: PathBuf, doc: PartDocument, history: Option<Box<History>>) {
         self.send(Job::Save {
             path,
             doc,
+            history,
             generation: self.generation,
         });
     }
@@ -168,7 +179,10 @@ fn run(jobs: Receiver<Job>, done: Sender<Done>, wake: impl Fn()) {
                 Job::Open(path) => Done::Opened {
                     result: guarded(|| {
                         sm_format::open(&path)
-                            .map(|f| f.document)
+                            .map(|f| Loaded {
+                                doc: f.document,
+                                history: f.history.map(Box::new),
+                            })
                             .map_err(|e| e.to_string())
                     }),
                     path,
@@ -176,6 +190,7 @@ fn run(jobs: Receiver<Job>, done: Sender<Done>, wake: impl Fn()) {
                 Job::Save {
                     path,
                     doc,
+                    history,
                     generation,
                 } => {
                     let model = last
@@ -183,7 +198,7 @@ fn run(jobs: Receiver<Job>, done: Sender<Done>, wake: impl Fn()) {
                         .filter(|(g, _)| *g == generation)
                         .map(|(_, m)| m);
                     Done::Saved {
-                        result: guarded(|| save(&path, &doc, model)),
+                        result: guarded(|| save(&path, &doc, history.as_deref(), model)),
                         path,
                     }
                 }
@@ -203,13 +218,18 @@ fn rebuild(doc: &PartDocument, cancel: &Arc<AtomicBool>) -> Result<(Model, Scene
     Ok((model, scene))
 }
 
-fn save(path: &Path, doc: &PartDocument, model: Option<&Model>) -> Result<bool, String> {
+fn save(
+    path: &Path,
+    doc: &PartDocument,
+    history: Option<&History>,
+    model: Option<&Model>,
+) -> Result<bool, String> {
     let name = path
         .file_name()
         .map_or_else(|| "part".into(), |n| n.to_string_lossy().into_owned());
     // Cache geometry only when it was built from exactly this document.
     let step = model.map(|m| sm_step::export(m, &name));
-    sm_format::save(path, doc, step.as_deref()).map_err(|e| e.to_string())?;
+    sm_format::save_with_history(path, doc, history, step.as_deref()).map_err(|e| e.to_string())?;
     Ok(step.is_some())
 }
 
@@ -306,7 +326,7 @@ mod tests {
 
         // Save queued right behind the rebuild uses its model.
         worker.rebuild(doc.clone());
-        worker.save(path.clone(), doc.clone());
+        worker.save(path.clone(), doc.clone(), None);
         let done = wait(&mut worker, 2);
         assert!(matches!(
             &done[1],
@@ -320,7 +340,7 @@ mod tests {
         let mut broken = doc.clone();
         broken.features[0].suppressed = true;
         worker.rebuild(broken.clone());
-        worker.save(path.clone(), broken);
+        worker.save(path.clone(), broken, None);
         let done = wait(&mut worker, 2);
         assert!(matches!(
             &done[1],
@@ -333,7 +353,7 @@ mod tests {
         worker.open(path.clone());
         match wait(&mut worker, 1).pop().unwrap() {
             Done::Opened { result, .. } => {
-                assert!(result.unwrap().features[0].suppressed);
+                assert!(result.unwrap().doc.features[0].suppressed);
             }
             _ => panic!("expected an open result"),
         }
@@ -341,6 +361,49 @@ mod tests {
         match wait(&mut worker, 1).pop().unwrap() {
             Done::Opened { result, .. } => assert!(result.is_err()),
             _ => panic!("expected an open result"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A part with versions keeps them through open, edit and save.
+    #[test]
+    fn saving_keeps_the_version_history() {
+        let dir = std::env::temp_dir().join(format!("sm-worker-hist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("versioned.smp");
+        let doc = demo::document();
+        let history = History::new(&doc, "first version", 0).unwrap();
+        sm_format::save_with_history(&path, &doc, Some(&history), None).unwrap();
+
+        let mut worker = Worker::new(|| {});
+        worker.open(path.clone());
+        let loaded = match wait(&mut worker, 1).pop().unwrap() {
+            Done::Opened { result, .. } => result.unwrap(),
+            _ => panic!("expected an open result"),
+        };
+        assert!(loaded.history.is_some());
+        let mut edited = loaded.doc;
+        edited.features[5].suppressed = true;
+        worker.rebuild(edited.clone());
+        worker.save(path.clone(), edited, loaded.history);
+        let done = wait(&mut worker, 2);
+        assert!(matches!(
+            &done[1],
+            Done::Saved {
+                result: Ok(true),
+                ..
+            }
+        ));
+
+        let reopened = sm_format::open(&path).unwrap();
+        assert!(reopened.document.features[5].suppressed);
+        assert_eq!(reopened.history.unwrap().versions().len(), 1);
+
+        // Without the history the save is refused, never silently lossy.
+        worker.save(path.clone(), demo::document(), None);
+        match wait(&mut worker, 1).pop().unwrap() {
+            Done::Saved { result, .. } => assert!(result.is_err()),
+            _ => panic!("expected a save result"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

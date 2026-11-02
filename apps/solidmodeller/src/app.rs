@@ -38,6 +38,8 @@ pub struct SolidApp {
     doc: PartDocument,
     /// Where Ctrl+S saves. `None` for the built-in demo part.
     path: Option<PathBuf>,
+    /// The part's version history, carried through saves unchanged.
+    history: Option<Box<sm_history::History>>,
     modified: bool,
 
     /// True once any rebuild of the current document has succeeded.
@@ -94,6 +96,7 @@ impl SolidApp {
         let mut app = SolidApp {
             doc,
             path,
+            history: None,
             modified: false,
             has_geometry: false,
             scene: SceneMesh::default(),
@@ -175,7 +178,8 @@ impl SolidApp {
                 },
                 Done::Opened { path, result } => match result {
                     Ok(loaded) => {
-                        self.doc = loaded;
+                        self.doc = loaded.doc;
+                        self.history = loaded.history;
                         self.path = Some(path);
                         self.modified = false;
                         self.has_geometry = false;
@@ -220,7 +224,8 @@ impl SolidApp {
             self.status = Some("Start with a file path to save (solidmodeller part.smp)".into());
             return false;
         };
-        self.worker.save(path, self.doc.clone());
+        self.worker
+            .save(path, self.doc.clone(), self.history.clone());
         self.modified = false;
         self.status = Some("Saving…".into());
         true
