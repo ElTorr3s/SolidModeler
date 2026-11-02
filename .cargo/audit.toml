@@ -10,4 +10,7 @@ ignore = [
     "RUSTSEC-2026-0196", # cgmath unmaintained: truck dependency
     "RUSTSEC-2026-0197", # cgmath swap_columns unsound: never called
     "RUSTSEC-2024-0370", # proc-macro-error unmaintained: compile time only
+    "RUSTSEC-2026-0370", # zvariant merged into zbus 6: portal read only
+    "RUSTSEC-2026-0371", # zbus_names merged into zbus 6: portal read only
+    "RUSTSEC-2026-0372", # zvariant_derive merged into zbus 6: portal read only
 ]

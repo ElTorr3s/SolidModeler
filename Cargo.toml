@@ -26,7 +26,7 @@ default-members = [
 version = "0.1.0"
 edition = "2021"
 # Checked in CI (msrv job). Raise it deliberately, not by accident.
-rust-version = "1.88"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/eltorr3s/solidmodeler"
 # An application, not a library collection: nothing goes to crates.io.
