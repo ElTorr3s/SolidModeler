@@ -20,3 +20,12 @@ uuid = { version = "1.29.0", features = ["v7", "serde"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 truck-modeling = "0.6"
 truck-stepio = "0.3"
+truck-shapeops = "0.4"
+
+# truck is slow unoptimised; optimise dependencies even in dev builds.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
