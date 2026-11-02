@@ -4,12 +4,22 @@
 //! Version commands (commit, log, branch, tag, checkout, merge) are in
 //! `history.rs`.
 
+/// Like `println!`, but never panics. A closed pipe (`smcli log | head`)
+/// is ignored, so a command that prints before saving (merge, checkout)
+/// still saves; any other write error is returned.
+macro_rules! outln {
+    ($($arg:tt)*) => {
+        $crate::out(format_args!($($arg)*))?
+    };
+}
+
 mod history;
 
 use sm_document::{
     BodyOperation, Extrude, ExtrudeExtent, FeatureKind, LengthUnit, OriginPlane, PartDocument,
     Profile, Sketch,
 };
+use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -97,7 +107,7 @@ fn demo(out: &str) -> Result<()> {
     let model = sm_kernel::rebuild(&doc)?;
     let step = sm_step::export(&model, &file_name(out));
     sm_format::save(Path::new(out), &doc, Some(&step))?;
-    println!(
+    outln!(
         "wrote {out} ({} features, {} bodies)",
         doc.features.len(),
         model.bodies.len()
@@ -108,7 +118,7 @@ fn demo(out: &str) -> Result<()> {
 fn rebuild(input: &str, step_out: Option<&str>) -> Result<()> {
     let file = sm_format::open(Path::new(input))?;
     let doc = &file.document;
-    println!(
+    outln!(
         "{} (format v{}, cache {})",
         printable(&doc.name),
         file.manifest.version,
@@ -119,7 +129,7 @@ fn rebuild(input: &str, step_out: Option<&str>) -> Result<()> {
         }
     );
     for feature in &doc.features {
-        println!(
+        outln!(
             "  {:>3}  {}{}",
             feature.id.0,
             printable(&feature.name),
@@ -131,12 +141,19 @@ fn rebuild(input: &str, step_out: Option<&str>) -> Result<()> {
         );
     }
     let model = sm_kernel::rebuild(doc)?;
-    println!("rebuilt {} bodies", model.bodies.len());
+    outln!("rebuilt {} bodies", model.bodies.len());
     if let Some(path) = step_out {
         std::fs::write(path, sm_step::export(&model, &file_name(path)))?;
-        println!("exported {path}");
+        outln!("exported {path}");
     }
     Ok(())
+}
+
+fn out(args: std::fmt::Arguments) -> std::io::Result<()> {
+    match writeln!(std::io::stdout(), "{args}") {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        result => result,
+    }
 }
 
 /// STEP headers record a file name, not the local path it was written to.
