@@ -16,15 +16,23 @@ publish = false
 
 [workspace.dependencies]
 sm-document = { path = "crates/sm-document" }
+sm-expr = { path = "crates/sm-expr" }
+sm-ids = { path = "crates/sm-ids" }
 sm-format = { path = "crates/sm-format" }
+sm-history = { path = "crates/sm-history" }
 sm-kernel = { path = "crates/sm-kernel" }
+sm-mesh = { path = "crates/sm-mesh" }
+sm-naming = { path = "crates/sm-naming" }
+sm-naming-types = { path = "crates/sm-naming-types" }
 sm-step = { path = "crates/sm-step" }
 sm-testkit = { path = "crates/sm-testkit" }
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip: the default parser can be off by one ulp, which would
 # silently move geometry on every save and reopen.
-serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_json = { version = "1", features = ["raw_value", "float_roundtrip"] }
+blake3 = { version = "1", default-features = false, features = ["std"] }
 thiserror = "2"
+uuid = { version = "1.29.0", features = ["v7", "serde"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 truck-modeling = "0.6"
 truck-stepio = "0.3"
