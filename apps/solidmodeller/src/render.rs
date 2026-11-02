@@ -7,7 +7,11 @@ use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
 use wgpu::util::DeviceExt;
 
-const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+/// Render target with hardware sRGB encoding, shown to egui through a plain
+/// [`DISPLAY_FORMAT`] view of the same texture.
+const SRGB_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+/// What egui samples. Without [`wgpu::DownlevelFlags::VIEW_FORMATS`] (some
+/// OpenGL drivers) we render straight into it and encode in the shader.
 const DISPLAY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// 4x MSAA is guaranteed for these formats on every WebGPU backend.
@@ -79,6 +83,17 @@ struct U {
 };
 @group(0) @binding(0) var<uniform> u: U;
 
+// True when the target is not sRGB, so the shader encodes instead.
+override ENCODE_SRGB: bool = false;
+
+fn encode(c: vec4<f32>) -> vec4<f32> {
+    if (!ENCODE_SRGB) { return c; }
+    let rgb = clamp(c.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    let lo = rgb * 12.92;
+    let hi = 1.055 * pow(rgb, vec3<f32>(1.0 / 2.4)) - 0.055;
+    return vec4<f32>(select(hi, lo, rgb <= vec3<f32>(0.0031308)), c.a);
+}
+
 struct BgOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) t: f32,
@@ -96,7 +111,7 @@ fn vs_bg(@builtin(vertex_index) i: u32) -> BgOut {
 
 @fragment
 fn fs_bg(in: BgOut) -> @location(0) vec4<f32> {
-    return mix(u.bg_bottom, u.bg_top, in.t);
+    return encode(mix(u.bg_bottom, u.bg_top, in.t));
 }
 
 struct MeshOut {
@@ -141,7 +156,7 @@ fn fs_mesh(in: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     let h = normalize(l + v);
     let spec = pow(max(dot(n, h), 0.0), 40.0) * 0.18;
     let color = base * (0.22 + 0.55 * diffuse + 0.25 * fill) + vec3<f32>(spec);
-    return vec4<f32>(color, 1.0);
+    return encode(vec4<f32>(color, 1.0));
 }
 
 struct LineOut {
@@ -162,8 +177,8 @@ fn vs_line(@location(0) pos: vec3<f32>, @location(1) group: u32) -> LineOut {
 
 @fragment
 fn fs_line(in: LineOut) -> @location(0) vec4<f32> {
-    if (in.group == u.selected.x) { return vec4<f32>(u.highlight.rgb * 0.55, 1.0); }
-    return u.edge;
+    if (in.group == u.selected.x) { return encode(vec4<f32>(u.highlight.rgb * 0.55, 1.0)); }
+    return encode(u.edge);
 }
 "#;
 
@@ -171,7 +186,8 @@ struct Targets {
     size: [u32; 2],
     msaa: wgpu::TextureView,
     depth: wgpu::TextureView,
-    /// sRGB view the render pass resolves into (encodes on write).
+    /// View the render pass resolves into: sRGB (encodes on write), or plain
+    /// when the shader encodes.
     resolve: wgpu::TextureView,
     /// Plain view of the same texture for egui, which expects sRGB-encoded
     /// bytes and must not decode them again on sampling.
@@ -191,10 +207,26 @@ pub struct ViewportRenderer {
     edges: Option<(wgpu::Buffer, u32)>,
     targets: Option<Targets>,
     texture: Option<egui::TextureId>,
+    /// Hardware sRGB target plus a plain view of it; false on adapters
+    /// without [`wgpu::DownlevelFlags::VIEW_FORMATS`].
+    srgb_view: bool,
 }
 
 impl ViewportRenderer {
-    pub fn new(device: &wgpu::Device) -> Self {
+    /// `downlevel` is the adapter's: it decides how the viewport gets its
+    /// sRGB encoding.
+    pub fn new(device: &wgpu::Device, downlevel: wgpu::DownlevelFlags) -> Self {
+        let srgb_view = downlevel.contains(wgpu::DownlevelFlags::VIEW_FORMATS);
+        let color_format = if srgb_view {
+            SRGB_FORMAT
+        } else {
+            DISPLAY_FORMAT
+        };
+        let constants: &[(&str, f64)] = if srgb_view {
+            &[]
+        } else {
+            &[("ENCODE_SRGB", 1.0)]
+        };
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("viewport"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -267,8 +299,11 @@ impl ViewportRenderer {
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
                     entry_point: Some(fs),
-                    compilation_options: Default::default(),
-                    targets: &[Some(COLOR_FORMAT.into())],
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants,
+                        ..Default::default()
+                    },
+                    targets: &[Some(color_format.into())],
                 }),
                 multiview_mask: None,
                 cache: None,
@@ -319,6 +354,7 @@ impl ViewportRenderer {
             edges: None,
             targets: None,
             texture: None,
+            srgb_view,
         }
     }
 
@@ -419,7 +455,7 @@ impl ViewportRenderer {
         let size = size.map(|s| s.clamp(1, limit));
         let resized = self.targets.as_ref().is_none_or(|t| t.size != size);
         if resized {
-            self.targets = Some(make_targets(device, size));
+            self.targets = Some(make_targets(device, size, self.srgb_view));
         }
         let targets = self.targets.as_ref().expect("created above");
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(uniforms));
@@ -471,7 +507,12 @@ impl ViewportRenderer {
     }
 }
 
-fn make_targets(device: &wgpu::Device, size: [u32; 2]) -> Targets {
+fn make_targets(device: &wgpu::Device, size: [u32; 2], srgb_view: bool) -> Targets {
+    let (color_format, view_formats): (_, &[_]) = if srgb_view {
+        (SRGB_FORMAT, &[DISPLAY_FORMAT])
+    } else {
+        (DISPLAY_FORMAT, &[])
+    };
     let texture = |label: &str, format, samples, usage, view_formats: &[wgpu::TextureFormat]| {
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
@@ -490,12 +531,12 @@ fn make_targets(device: &wgpu::Device, size: [u32; 2]) -> Targets {
     };
     let resolve = texture(
         "viewport color",
-        COLOR_FORMAT,
+        color_format,
         1,
         wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_SRC,
-        &[DISPLAY_FORMAT],
+        view_formats,
     );
     let view = |t: wgpu::Texture| t.create_view(&Default::default());
     Targets {
@@ -509,7 +550,7 @@ fn make_targets(device: &wgpu::Device, size: [u32; 2]) -> Targets {
         resolve_texture: resolve,
         msaa: view(texture(
             "viewport msaa",
-            COLOR_FORMAT,
+            color_format,
             SAMPLES,
             wgpu::TextureUsages::RENDER_ATTACHMENT,
             &[],
@@ -531,27 +572,54 @@ mod tests {
     use crate::demo;
     use crate::mesh::tessellate;
 
-    /// A device on whatever adapter exists, software included. `None` on
-    /// machines with no adapter at all, or only one without the sRGB view
-    /// formats the viewport needs (a GL fallback, as in CI's Arch
-    /// container), where the test is skipped.
-    fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    struct Gpu {
+        name: String,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        downlevel: wgpu::DownlevelFlags,
+    }
+
+    /// One device per Vulkan and OpenGL adapter, software ones included, so
+    /// a machine with only an OpenGL fallback is tested too. Empty on
+    /// machines with no adapter at all, where the tests are skipped.
+    fn gpus() -> Vec<Gpu> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            force_fallback_adapter: false,
-            compatible_surface: None,
-            ..Default::default()
-        }))
-        .ok()?;
-        if !adapter
-            .get_downlevel_capabilities()
-            .flags
-            .contains(wgpu::DownlevelFlags::VIEW_FORMATS)
-        {
-            return None;
+        let adapters = pollster::block_on(
+            instance.enumerate_adapters(wgpu::Backends::VULKAN | wgpu::Backends::GL),
+        );
+        adapters
+            .into_iter()
+            .filter_map(|adapter| {
+                let info = adapter.get_info();
+                // The app asks for no more than WebGL2 limits on OpenGL either.
+                let limits = if info.backend == wgpu::Backend::Gl {
+                    wgpu::Limits::downlevel_webgl2_defaults()
+                } else {
+                    wgpu::Limits::default()
+                };
+                let desc = wgpu::DeviceDescriptor {
+                    required_limits: limits.using_resolution(adapter.limits()),
+                    ..Default::default()
+                };
+                let (device, queue) = pollster::block_on(adapter.request_device(&desc)).ok()?;
+                Some(Gpu {
+                    name: format!("{} ({:?})", info.name, info.backend),
+                    device,
+                    queue,
+                    downlevel: adapter.get_downlevel_capabilities().flags,
+                })
+            })
+            .collect()
+    }
+
+    /// The colour paths `gpu` can run: the sRGB view where supported, and
+    /// always the shader-encoded fallback.
+    fn paths(gpu: &Gpu) -> Vec<wgpu::DownlevelFlags> {
+        let mut paths = vec![gpu.downlevel - wgpu::DownlevelFlags::VIEW_FORMATS];
+        if gpu.downlevel.contains(wgpu::DownlevelFlags::VIEW_FORMATS) {
+            paths.push(gpu.downlevel);
         }
-        pollster::block_on(adapter.request_device(&Default::default())).ok()
+        paths
     }
 
     fn read(device: &wgpu::Device, queue: &wgpu::Queue, r: &ViewportRenderer) -> (u32, Vec<u8>) {
@@ -597,10 +665,62 @@ mod tests {
 
     #[test]
     fn draws_background_body_and_highlight() {
-        let Some((device, queue)) = device() else {
-            eprintln!("no suitable GPU adapter; skipping");
+        let gpus = gpus();
+        if gpus.is_empty() {
+            eprintln!("no GPU adapter; skipping");
+        }
+        for gpu in &gpus {
+            for downlevel in paths(gpu) {
+                eprintln!("{}, {downlevel:?}", gpu.name);
+                draw_checks(&gpu.device, &gpu.queue, downlevel);
+            }
+        }
+    }
+
+    /// Both colour paths give the same picture, give or take rounding.
+    #[test]
+    fn shader_srgb_matches_hardware_srgb() {
+        let Some(gpu) = gpus()
+            .into_iter()
+            .find(|g| g.downlevel.contains(wgpu::DownlevelFlags::VIEW_FORMATS))
+        else {
+            eprintln!("no adapter with VIEW_FORMATS; skipping");
             return;
         };
+        let model = sm_kernel::rebuild(&demo::document()).unwrap();
+        let scene = tessellate(&model, &Default::default()).unwrap();
+        let mut camera = Camera::default();
+        camera.scene_center = scene.center;
+        camera.scene_radius = scene.radius;
+        camera.fit(1.0);
+        let mut u = Uniforms::new(camera.projection(1.0) * camera.view());
+        u.bg_top = [0.02, 0.05, 0.3, 1.0];
+        u.bg_bottom = [0.4, 0.2, 0.01, 1.0];
+        let frames: Vec<_> = paths(&gpu)
+            .into_iter()
+            .map(|downlevel| {
+                let mut r = ViewportRenderer::new(&gpu.device, downlevel);
+                r.set_mesh(&gpu.device, &scene);
+                r.draw(&gpu.device, &gpu.queue, [64, 64], &u);
+                read(&gpu.device, &gpu.queue, &r)
+            })
+            .collect();
+        let (shader, hardware) = (&frames[0], &frames[1]);
+        // Pixels match to rounding, except on anti-aliased edges, which the
+        // fallback resolves in encoded rather than linear space.
+        let mut same = 0;
+        for y in 0..64 {
+            for x in 0..64 {
+                let (a, b) = (pixel(shader, x, y), pixel(hardware, x, y));
+                if a.iter().zip(b).all(|(a, b)| a.abs_diff(b) <= 1) {
+                    same += 1;
+                }
+            }
+        }
+        assert!(same > 64 * 64 * 9 / 10, "only {same} of 4096 pixels match");
+    }
+
+    fn draw_checks(device: &wgpu::Device, queue: &wgpu::Queue, downlevel: wgpu::DownlevelFlags) {
         let model = sm_kernel::rebuild(&demo::document()).unwrap();
         let scene = tessellate(&model, &Default::default()).unwrap();
         let mut camera = Camera::default();
@@ -609,8 +729,8 @@ mod tests {
         camera.go_to(StandardView::Front, 0.0);
         camera.animate(1.0);
         camera.fit(1.0);
-        let mut r = ViewportRenderer::new(&device);
-        r.set_mesh(&device, &scene);
+        let mut r = ViewportRenderer::new(device, downlevel);
+        r.set_mesh(device, &scene);
 
         let mut u = Uniforms::new(camera.projection(1.0) * camera.view());
         u.light = [0.0, 0.0, 1.0, 0.0];
@@ -619,8 +739,8 @@ mod tests {
         u.bg_bottom = [0.0, 0.0, 0.0, 1.0];
         u.body = [0.5, 0.5, 0.5, 1.0];
         u.highlight = [1.0, 0.0, 0.0, 1.0];
-        assert!(r.draw(&device, &queue, [64, 64], &u));
-        let frame = read(&device, &queue, &r);
+        assert!(r.draw(device, queue, [64, 64], &u));
+        let frame = read(device, queue, &r);
         // Corner: background. Centre (inside the pocket floor): grey body.
         assert_eq!(pixel(&frame, 1, 1), [0, 0, 0]);
         let body = pixel(&frame, 32, 32);
@@ -633,8 +753,8 @@ mod tests {
         let ray = camera.ray(glam::Vec2::splat(32.0), glam::Vec2::splat(64.0));
         let (face, _) = scene.mesh.pick(ray.0.into(), ray.1.into()).unwrap();
         u.selected[1] = face as u32;
-        assert!(!r.draw(&device, &queue, [64, 64], &u));
-        let frame = read(&device, &queue, &r);
+        assert!(!r.draw(device, queue, [64, 64], &u));
+        let frame = read(device, queue, &r);
         let lit = pixel(&frame, 32, 32);
         // Red plus a white specular highlight (light and eye coincide).
         assert!(lit[0] == 255 && lit[1] == lit[2] && lit[1] < 160, "{lit:?}");
@@ -645,20 +765,20 @@ mod tests {
         // A pick selects the face and its feature: the rest of the body is
         // only tinted.
         u.selected[0] = 0;
-        r.draw(&device, &queue, [64, 64], &u);
-        let frame = read(&device, &queue, &r);
+        r.draw(device, queue, [64, 64], &u);
+        let frame = read(device, queue, &r);
         assert_eq!(pixel(&frame, 32, 32), lit);
         let side = pixel(&frame, 12, 32);
         assert!(side[0] > side[1] && side[1] > 40, "{side:?}");
 
         // Selecting the feature's group tints the whole body.
         u.selected = [0, u32::MAX, 0, 0];
-        r.draw(&device, &queue, [64, 64], &u);
-        let frame = read(&device, &queue, &r);
+        r.draw(device, queue, [64, 64], &u);
+        let frame = read(device, queue, &r);
         let tinted = pixel(&frame, 32, 32);
         assert!(tinted[0] > tinted[1] && tinted[1] > 40, "{tinted:?}");
 
         // A zero-size request is clamped instead of failing validation.
-        assert!(r.draw(&device, &queue, [0, 0], &u));
+        assert!(r.draw(device, queue, [0, 0], &u));
     }
 }
