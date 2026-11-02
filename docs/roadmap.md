@@ -43,4 +43,4 @@ Linux/Wayland with first-class Omarchy support.
      version manager UI).
 
 Progress against Inventor and SolidWorks, feature by feature, is tracked in
-[feature-parity.md](feature-parity.md), which also proposes the steps after 4.
+[feature-parity.md](feature-parity.md), which also proposes the next steps.
