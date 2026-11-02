@@ -532,7 +532,9 @@ mod tests {
     use crate::mesh::tessellate;
 
     /// A device on whatever adapter exists, software included. `None` on
-    /// machines with no adapter at all, where the test is skipped.
+    /// machines with no adapter at all, or only one without the sRGB view
+    /// formats the viewport needs (a GL fallback, as in CI's Arch
+    /// container), where the test is skipped.
     fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -542,6 +544,13 @@ mod tests {
             ..Default::default()
         }))
         .ok()?;
+        if !adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::VIEW_FORMATS)
+        {
+            return None;
+        }
         pollster::block_on(adapter.request_device(&Default::default())).ok()
     }
 
@@ -589,7 +598,7 @@ mod tests {
     #[test]
     fn draws_background_body_and_highlight() {
         let Some((device, queue)) = device() else {
-            eprintln!("no GPU adapter; skipping");
+            eprintln!("no suitable GPU adapter; skipping");
             return;
         };
         let model = sm_kernel::rebuild(&demo::document()).unwrap();
