@@ -30,6 +30,8 @@ exported to STEP. There is no GUI yet.
 
 ## Try it
 
+To build and try the app on Omarchy, see [TESTING.md](TESTING.md).
+
 ```sh
 cargo test
 cargo run -p smcli -- demo block.smp            # block with a pocket and a notch
