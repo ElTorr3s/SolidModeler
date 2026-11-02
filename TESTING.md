@@ -2,8 +2,8 @@
 
 Everything built so far is on `main`: the truck kernel with booleans, the
 part history with versions, branches and merges, the sketch solver,
-topological naming, the desktop app, CI with fuzzing, and the OpenCASCADE
-facade.
+topological naming, the desktop app, and CI with fuzzing. The OpenCASCADE
+facade (PR #10) follows once its sandbox fixes are reviewed.
 
 ## 1. Install
 
@@ -93,25 +93,13 @@ saving from the app keeps the version history (`smcli log` still shows it).
 - **History is command line only.** The app keeps and saves versions but has
   no version or branch panel.
 - **No File → Open**, and a part started without a file cannot be saved.
-- **STEP import** exists only in the OpenCASCADE crate and its tests;
-  neither the app nor `smcli` can import STEP yet. STEP export works.
-- The app still runs on the `truck` kernel; the OpenCASCADE facade is built
-  and tested on its own.
+- **No STEP import yet.** It lives in the OpenCASCADE crate (PR #10), which
+  the app and `smcli` do not use yet. STEP export works.
+- The app runs on the `truck` kernel.
+- On a machine with no Vulkan driver (OpenGL only) the app can crash at
+  start; a fix is in review. Omarchy ships Vulkan, so this should not
+  affect you.
 - `smcli log | head` panics when `head` closes the pipe early.
-
-## Optional: the OpenCASCADE crate
-
-`sm-occt` is left out of a plain `cargo build` because it needs
-OpenCASCADE:
-
-```sh
-sudo pacman -S opencascade
-cargo test -p sm-occt
-```
-
-It is tested against OpenCASCADE 7.6 (Ubuntu) and 7.9.3, and CI runs it on
-Arch's own package. OpenCASCADE 8.0 does not compile yet; a fix
-is on the way.
 
 ## If something goes wrong
 
