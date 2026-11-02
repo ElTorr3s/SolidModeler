@@ -119,8 +119,8 @@ fn invalid_inputs_are_errors_not_crashes() {
         [0.0, 1.0, 0.0]
     ]])
     .is_err());
-    assert!(Shape::from_brep(b"not a brep").is_err());
-    assert!(Shape::from_brep(&[]).is_err());
+    assert!(Shape::load_brep(b"not a brep").is_err());
+    assert!(Shape::load_brep(&[]).is_err());
 }
 
 #[test]
