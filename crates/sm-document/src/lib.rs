@@ -79,6 +79,26 @@ pub enum FeatureKind {
     Extrude(Extrude),
 }
 
+impl FeatureKind {
+    /// Ids of the earlier features this one depends on.
+    pub fn references(&self) -> Vec<FeatureId> {
+        match self {
+            FeatureKind::Sketch(_) => Vec::new(),
+            FeatureKind::Extrude(e) => vec![e.sketch],
+        }
+    }
+
+    /// Rewrites every feature reference through `map`. Merging uses this to
+    /// renumber features two branches added under the same id, so every new
+    /// kind of reference must be handled here.
+    pub fn remap_references(&mut self, mut map: impl FnMut(FeatureId) -> FeatureId) {
+        match self {
+            FeatureKind::Sketch(_) => {}
+            FeatureKind::Extrude(e) => e.sketch = map(e.sketch),
+        }
+    }
+}
+
 /// The three origin planes every part starts with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -138,7 +158,7 @@ pub enum ExtrudeExtent {
     Symmetric { distance: f64 },
 }
 
-#[derive(Debug, thiserror::Error, PartialEq)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq)]
 pub enum DocumentError {
     #[error("feature {0:?} does not exist")]
     MissingFeature(FeatureId),
@@ -200,6 +220,19 @@ impl PartDocument {
     pub fn repair_ids(&mut self) {
         let max = self.features.iter().map(|f| f.id.0).max().unwrap_or(0);
         self.next_id = self.next_id.max(max.saturating_add(1));
+    }
+
+    /// The id [`PartDocument::add_feature`] would hand out next.
+    pub fn next_id(&self) -> FeatureId {
+        let max = self.features.iter().map(|f| f.id.0).max().unwrap_or(0);
+        FeatureId(self.next_id.max(max.saturating_add(1)))
+    }
+
+    /// Makes sure ids handed out from now on are at least `next`. Versioning
+    /// uses this so features added on different branches of one history
+    /// never get the same id.
+    pub fn reserve_ids(&mut self, next: FeatureId) {
+        self.next_id = self.next_id.max(next.0);
     }
 
     pub fn feature(&self, id: FeatureId) -> Option<&Feature> {
@@ -283,6 +316,20 @@ fn finite(value: f64, what: impl FnOnce() -> String) -> Result<(), DocumentError
     } else {
         Err(DocumentError::NonFinite(what()))
     }
+}
+
+/// Characters that must not reach a terminal or a name from a file: control
+/// characters (Unicode Cc) and invisible format characters (Cf), such as the
+/// bidirectional overrides that can make "main\u{202e}" display as "main".
+pub fn is_unsafe_text_char(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}'
+            | '\u{890}'..='\u{891}' | '\u{8e2}' | '\u{180e}' | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}'
+            | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{110bd}' | '\u{110cd}'
+            | '\u{13430}'..='\u{1343f}' | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
 }
 
 /// Parameter names must work in expressions: a letter or `_`, then letters,
@@ -458,5 +505,53 @@ mod tests {
         let json = serde_json::to_string(&doc).unwrap();
         let back: PartDocument = serde_json::from_str(&json).unwrap();
         assert_eq!(doc, back);
+    }
+
+    #[test]
+    fn references_and_remapping() {
+        let mut doc = block();
+        assert!(doc.features[0].kind.references().is_empty());
+        assert_eq!(doc.features[1].kind.references(), [FeatureId(1)]);
+        doc.features[1]
+            .kind
+            .remap_references(|id| FeatureId(id.0 + 10));
+        assert_eq!(doc.features[1].kind.references(), [FeatureId(11)]);
+    }
+
+    #[test]
+    fn next_id_accounts_for_ids_in_use() {
+        let mut doc = block();
+        assert_eq!(doc.next_id(), FeatureId(3));
+        doc.features[0].id = FeatureId(41);
+        assert_eq!(doc.next_id(), FeatureId(42));
+    }
+
+    #[test]
+    fn reserve_ids_only_raises() {
+        let mut doc = block();
+        doc.reserve_ids(FeatureId(10));
+        assert_eq!(doc.next_id(), FeatureId(10));
+        doc.reserve_ids(FeatureId(5));
+        assert_eq!(doc.add_feature("S", empty_sketch()), FeatureId(10));
+    }
+
+    #[test]
+    fn unsafe_text_chars() {
+        for c in [
+            '\0',
+            '\n',
+            '\u{1b}',
+            '\u{7f}',
+            '\u{9b}',
+            '\u{202e}',
+            '\u{200b}',
+            '\u{feff}',
+            '\u{e0041}',
+        ] {
+            assert!(is_unsafe_text_char(c), "{c:?}");
+        }
+        for c in ['a', 'é', ' ', '-', '中', 'z'] {
+            assert!(!is_unsafe_text_char(c), "{c:?}");
+        }
     }
 }

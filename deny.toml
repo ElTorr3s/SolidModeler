@@ -1,0 +1,51 @@
+# cargo-deny configuration. CI runs `cargo deny check` on every pull request.
+
+[graph]
+all-features = true
+
+[advisories]
+# Every ignore needs a reason and should be revisited when truck is replaced
+# by the OpenCASCADE backend (decision K1), which removes all of these.
+ignore = [
+    # vtkio (pulled in by truck-meshalgo <- truck-shapeops) depends on these
+    # for reading and writing VTK files. SolidModeller never calls vtkio, so
+    # no untrusted data reaches lz4_flex or quick-xml.
+    { id = "RUSTSEC-2026-0041", reason = "lz4_flex via vtkio; VTK I/O is never used" },
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml via vtkio; VTK I/O is never used" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml via vtkio; VTK I/O is never used" },
+    # cgmath is truck's math library. The unsound function
+    # (Matrix::swap_columns with identical indices) is not called by truck or
+    # by us. Replaced with the move to the OpenCASCADE backend.
+    { id = "RUSTSEC-2026-0196", reason = "cgmath unmaintained; truck dependency, removed with the OCCT backend" },
+    { id = "RUSTSEC-2026-0197", reason = "cgmath swap_columns unsound; not called; removed with the OCCT backend" },
+    # Build-time only (proc macro used by ruststep-derive <- truck-stepio).
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained; compile-time only, via truck-stepio" },
+]
+
+[licenses]
+# Permissive licenses compatible with shipping SolidModeller under
+# MIT OR Apache-2.0. Anything else needs a deliberate decision.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace path dependencies have no version, which is fine.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
