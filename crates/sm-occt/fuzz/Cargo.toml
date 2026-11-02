@@ -1,0 +1,36 @@
+[package]
+name = "sm-occt-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sm-occt = { path = ".." }
+
+# Not part of the main workspace: fuzzing needs nightly, libFuzzer and
+# the system OpenCascade.
+[workspace]
+
+[profile.release]
+debug = 1
+
+# The Rust B-rep screen alone: must never panic, whatever the bytes.
+[[bin]]
+name = "brep_screen"
+path = "fuzz_targets/brep_screen.rs"
+test = false
+doc = false
+bench = false
+
+# Screen then OpenCascade's reader, the path the parent process takes with
+# the STEP worker's output: must never crash.
+[[bin]]
+name = "brep_load"
+path = "fuzz_targets/brep_load.rs"
+test = false
+doc = false
+bench = false
