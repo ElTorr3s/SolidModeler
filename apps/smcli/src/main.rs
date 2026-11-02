@@ -4,12 +4,21 @@
 //! Version commands (commit, log, branch, tag, checkout, merge) are in
 //! `history.rs`.
 
+/// Like `println!`, but a failed write (such as a closed pipe in
+/// `smcli log | head`) returns an error instead of panicking.
+macro_rules! outln {
+    ($($arg:tt)*) => {
+        writeln!(std::io::stdout(), $($arg)*)?
+    };
+}
+
 mod history;
 
 use sm_document::{
     BodyOperation, Extrude, ExtrudeExtent, FeatureKind, LengthUnit, OriginPlane, PartDocument,
     Profile, Sketch,
 };
+use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -37,6 +46,8 @@ fn main() -> ExitCode {
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
+        // The reader stopped reading (`smcli log | head`): nothing is wrong.
+        Err(e) if is_broken_pipe(e.as_ref()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {}", printable(&e.to_string()));
             ExitCode::FAILURE
@@ -97,7 +108,7 @@ fn demo(out: &str) -> Result<()> {
     let model = sm_kernel::rebuild(&doc)?;
     let step = sm_step::export(&model, &file_name(out));
     sm_format::save(Path::new(out), &doc, Some(&step))?;
-    println!(
+    outln!(
         "wrote {out} ({} features, {} bodies)",
         doc.features.len(),
         model.bodies.len()
@@ -108,7 +119,7 @@ fn demo(out: &str) -> Result<()> {
 fn rebuild(input: &str, step_out: Option<&str>) -> Result<()> {
     let file = sm_format::open(Path::new(input))?;
     let doc = &file.document;
-    println!(
+    outln!(
         "{} (format v{}, cache {})",
         printable(&doc.name),
         file.manifest.version,
@@ -119,7 +130,7 @@ fn rebuild(input: &str, step_out: Option<&str>) -> Result<()> {
         }
     );
     for feature in &doc.features {
-        println!(
+        outln!(
             "  {:>3}  {}{}",
             feature.id.0,
             printable(&feature.name),
@@ -131,12 +142,17 @@ fn rebuild(input: &str, step_out: Option<&str>) -> Result<()> {
         );
     }
     let model = sm_kernel::rebuild(doc)?;
-    println!("rebuilt {} bodies", model.bodies.len());
+    outln!("rebuilt {} bodies", model.bodies.len());
     if let Some(path) = step_out {
         std::fs::write(path, sm_step::export(&model, &file_name(path)))?;
-        println!("exported {path}");
+        outln!("exported {path}");
     }
     Ok(())
+}
+
+fn is_broken_pipe(e: &(dyn std::error::Error + 'static)) -> bool {
+    e.downcast_ref::<std::io::Error>()
+        .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe)
 }
 
 /// STEP headers record a file name, not the local path it was written to.

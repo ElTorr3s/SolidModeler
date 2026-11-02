@@ -15,6 +15,7 @@ use crate::{printable, Result};
 use sm_document::{ExtrudeExtent, FeatureKind};
 use sm_format::SmpFile;
 use sm_history::{History, MergeOutcome, Resolutions, Side};
+use std::io::Write;
 use std::path::Path;
 
 pub const USAGE: &str = "smcli commit <in.smp> <message> | log <in.smp> | \
@@ -81,22 +82,22 @@ fn commit(path: &str, message: &str) -> Result<()> {
         }
     };
     save(path, &file)?;
-    println!("recorded version {}", id.short());
+    outln!("recorded version {}", id.short());
     Ok(())
 }
 
 fn log(path: &str) -> Result<()> {
     let file = sm_format::open(Path::new(path))?;
     let Some(h) = &file.history else {
-        println!("no versions yet");
+        outln!("no versions yet");
         return Ok(());
     };
     match h.current_branch() {
-        Some(b) => println!("on branch {}", printable(b)),
-        None => println!("on version {}", h.head_version().id.short()),
+        Some(b) => outln!("on branch {}", printable(b)),
+        None => outln!("on version {}", h.head_version().id.short()),
     }
     if !h.is_clean(&file.document)? {
-        println!("(the open part has changes not recorded as a version)");
+        outln!("(the open part has changes not recorded as a version)");
     }
     let labels = |id| {
         let names: Vec<&str> = h
@@ -114,7 +115,7 @@ fn log(path: &str) -> Result<()> {
     };
     for v in h.versions().iter().rev() {
         let parents: Vec<&str> = v.parents.iter().map(|p| p.short()).collect();
-        println!(
+        outln!(
             "{}{}  {}  [parents: {}]",
             v.id.short(),
             labels(&v.id),
@@ -126,7 +127,7 @@ fn log(path: &str) -> Result<()> {
             }
         );
         for change in h.changes(v)? {
-            println!("    {}", printable(&change.to_string()));
+            outln!("    {}", printable(&change.to_string()));
         }
     }
     Ok(())
@@ -136,7 +137,7 @@ fn checkout(path: &str, target: &str) -> Result<()> {
     with_history(path, |h, file| {
         file.document = h.checkout(target, &file.document)?;
         file.cached_step = None;
-        println!("checked out {}", printable(target));
+        outln!("checked out {}", printable(target));
         Ok(())
     })
 }
@@ -154,16 +155,16 @@ fn merge(path: &str, target: &str, side: Option<Side>) -> Result<()> {
             outcome = h.merge(target, &file.document, &picks, now)?;
         }
         match outcome {
-            MergeOutcome::UpToDate => println!("already up to date"),
+            MergeOutcome::UpToDate => outln!("already up to date"),
             MergeOutcome::FastForward(doc) => {
                 file.document = doc;
                 file.cached_step = None;
-                println!("fast-forwarded to {}", printable(target));
+                outln!("fast-forwarded to {}", printable(target));
             }
             MergeOutcome::Merged { version, document } => {
                 file.document = document;
                 file.cached_step = None;
-                println!(
+                outln!(
                     "merged {} as version {}",
                     printable(target),
                     version.short()
@@ -175,7 +176,7 @@ fn merge(path: &str, target: &str, side: Option<Side>) -> Result<()> {
                     let show = |v: &Option<serde_json::Value>| {
                         v.as_ref().map_or("deleted".into(), |v| v.to_string())
                     };
-                    println!(
+                    outln!(
                         "conflict on {}: ours {} / theirs {}",
                         c.key,
                         show(&c.ours),
@@ -183,7 +184,7 @@ fn merge(path: &str, target: &str, side: Option<Side>) -> Result<()> {
                     );
                 }
                 if let Some(e) = &result.invalid {
-                    println!(
+                    outln!(
                         "the merged part would be invalid: {}",
                         printable(&e.to_string())
                     );

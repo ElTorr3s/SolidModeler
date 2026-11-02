@@ -48,7 +48,7 @@ pub enum FormatError {
     Io(#[from] std::io::Error),
     #[error("archive error: {0}")]
     Zip(#[from] zip::result::ZipError),
-    #[error("invalid json in {file}: {source}")]
+    #[error("{}", json_message(.file, .source))]
     Json {
         file: &'static str,
         source: serde_json::Error,
@@ -69,6 +69,16 @@ pub enum FormatError {
     WouldDropHistory,
     #[error("upgrading the version history: {0}")]
     History(#[from] sm_history::HistoryError),
+}
+
+/// Text that isn't JSON is "invalid json"; JSON whose content is wrong (a
+/// missing field, a hash that doesn't match) says only where it is, since
+/// the message already says what is wrong.
+fn json_message(file: &str, source: &serde_json::Error) -> String {
+    match source.classify() {
+        serde_json::error::Category::Data => format!("{file}: {source}"),
+        _ => format!("invalid json in {file}: {source}"),
+    }
 }
 
 /// Largest ratio between an entry's text and the whole archive accepted for
@@ -608,6 +618,37 @@ mod tests {
             result,
             Err(FormatError::Json { file: HISTORY, .. })
         ));
+    }
+
+    #[test]
+    fn history_errors_say_whether_the_json_or_its_content_is_wrong() {
+        let doc = part();
+        let history = History::new(&doc, "Initial", 1).unwrap();
+        let text = serde_json::to_string(&history).unwrap();
+        let mut buf = to_bytes(&doc, None);
+        let manifest = entry(&mut buf, MANIFEST);
+        let document = entry(&mut buf, DOCUMENT);
+        let message = |history: &[u8]| {
+            read(archive(&[
+                (MANIFEST, &manifest),
+                (DOCUMENT, &document),
+                (HISTORY, history),
+            ]))
+            .unwrap_err()
+            .to_string()
+        };
+
+        // Well-formed JSON whose object no longer matches its hash.
+        let tampered = text.replacen("\"name\":\"Part1\"", "\"name\":\"Evil1\"", 1);
+        assert_ne!(tampered, text);
+        let m = message(tampered.as_bytes());
+        assert!(m.starts_with("history.json: "), "{m}");
+        assert!(m.contains("does not match its hash"), "{m}");
+        assert!(!m.contains("invalid json"), "{m}");
+
+        // Text that isn't JSON at all.
+        let m = message(&text.as_bytes()[..text.len() / 2]);
+        assert!(m.starts_with("invalid json in history.json: "), "{m}");
     }
 
     #[test]
