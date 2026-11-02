@@ -4,6 +4,7 @@
 
 use proptest::prelude::*;
 use sm_kernel::profile::{regions, signed_area};
+use sm_kernel::LINEAR_TOLERANCE_MM;
 use sm_testkit::strategies::{buildable_document, document, profile};
 use truck_topology::shell::ShellCondition;
 
@@ -28,7 +29,7 @@ proptest! {
     /// clockwise.
     #[test]
     fn regions_are_oriented(loops in prop::collection::vec(profile(), 0..4)) {
-        if let Ok(regions) = regions(&loops) {
+        if let Ok(regions) = regions(&loops, LINEAR_TOLERANCE_MM) {
             for r in regions {
                 prop_assert!(signed_area(&r.outer) > 0.0);
                 for h in &r.holes {
