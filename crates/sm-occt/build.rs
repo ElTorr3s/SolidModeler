@@ -44,10 +44,12 @@ fn main() {
         .compile("sm-occt-shim");
 
     if let Some(dir) = std::env::var_os("OCCT_LIB_DIR") {
-        println!(
-            "cargo:rustc-link-search=native={}",
-            Path::new(&dir).display()
-        );
+        let dir = Path::new(&dir).display();
+        println!("cargo:rustc-link-search=native={dir}");
+        // The STEP worker starts with an empty environment, so it cannot
+        // rely on LD_LIBRARY_PATH to find libraries outside the loader's
+        // default path.
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
     }
     let header = include.join("Standard_Version.hxx");
     println!("cargo:rerun-if-changed={}", header.display());
