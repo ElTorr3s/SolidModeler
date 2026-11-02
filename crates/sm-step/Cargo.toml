@@ -3,7 +3,9 @@ name = "sm-step"
 description = "STEP (ISO 10303-21) export of rebuilt solids"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 sm-document.workspace = true
@@ -13,4 +15,10 @@ truck-stepio.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
+criterion.workspace = true
+sm-testkit.workspace = true
 truck-topology = "0.6"
+
+[[bench]]
+name = "export"
+harness = false

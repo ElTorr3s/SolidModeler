@@ -4,6 +4,8 @@ description = "Persistent names for faces, edges and vertices that survive rebui
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 
 [dependencies]
 sm-document.workspace = true

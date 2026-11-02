@@ -3,7 +3,9 @@ name = "sm-kernel"
 description = "Replays a part's feature history into B-rep solids using truck"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 sm-document.workspace = true
@@ -12,3 +14,12 @@ truck-modeling.workspace = true
 truck-shapeops.workspace = true
 truck-meshalgo = { version = "0.4", default-features = false, features = ["tessellation", "analyzers"] }
 truck-topology = "0.6"
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+sm-testkit = { workspace = true, features = ["proptest"] }
+
+[[bench]]
+name = "rebuild"
+harness = false

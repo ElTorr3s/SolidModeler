@@ -4,6 +4,8 @@ description = "Versions, branches and feature-level merges of a part's history"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 
 [dependencies]
 sm-document.workspace = true
